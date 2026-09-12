@@ -1,0 +1,7 @@
+tunnel: c8678e62-7c68-4197-a975-833d3b1ad68a
+credentials-file: /home/shellgames/shellgames/deploy/.cloudflared/c8678e62-7c68-4197-a975-833d3b1ad68a.json
+
+ingress:
+  - hostname: shellgames.santiagortega.dev
+    service: http://localhost:8888
+  - service: http_status:404

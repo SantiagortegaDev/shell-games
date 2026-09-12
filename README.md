@@ -1,2 +1,1 @@
-# shell-games
-Shell Games
+# Shell Games
