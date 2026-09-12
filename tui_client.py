@@ -1,0 +1,744 @@
+#!/usr/bin/env python3
+"""Cliente TUI para Shell Games (Textual): menu, chat status y 3 en raya."""
+import asyncio
+import os
+import random
+import re
+import sys
+
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.containers import Vertical
+from textual.message import Message
+from textual.reactive import reactive
+from textual.screen import ModalScreen, Screen
+from textual.widgets import Input, Static
+from websockets.asyncio.client import connect
+
+from games import WIN_LINES
+
+DEFAULT_URL = "wss://shellgames.santiagortega.dev"
+
+BANNER = r"""   _____ __         ____   ______
+  / ___// /_  ___  / / /  / ____/___ _____ ___  ___  _____
+  \__ \/ __ \/ _ \/ / /  / / __/ __ `/ __ `__ \/ _ \/ ___/
+ ___/ / / / /  __/ / /  / /_/ / /_/ / / / / / /  __(__  )
+/____/_/ /_/\___/_/_/   \____/\__,_/_/ /_/ /_/\___/____/"""
+
+
+# ---------------------------------------------------------------------------
+# Widgets reusables
+# ---------------------------------------------------------------------------
+
+
+class Menu(Static, can_focus=True):
+    """Lista de radios propia: icono/color igual al diseno (.tui), sin el
+    estilo por defecto de Textual (circulo, fondo azul al enfocar)."""
+
+    SELECTED_ICON = "▶"  # ▶
+    UNSELECTED_ICON = "─"  # ─
+
+    BINDINGS = [
+        Binding("up", "cursor_up", "Arriba"),
+        Binding("down", "cursor_down", "Abajo"),
+        Binding("enter", "select", "Seleccionar", priority=True),
+    ]
+
+    index = reactive(0)
+
+    class Selected(Message):
+        def __init__(self, value: str) -> None:
+            self.value = value
+            super().__init__()
+
+    def __init__(self, options: list[tuple[str, str]], show_hint: bool = True, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.options = options
+        self.show_hint = show_hint
+
+    def on_mount(self) -> None:
+        self._render_menu()
+
+    def watch_index(self) -> None:
+        self._render_menu()
+
+    def _render_menu(self) -> None:
+        lines = []
+        for i, (_, label) in enumerate(self.options):
+            if i == self.index:
+                lines.append(f"[green]{self.SELECTED_ICON} {label}[/green]")
+            else:
+                lines.append(f"[white]{self.UNSELECTED_ICON} {label}[/white]")
+        if self.show_hint:
+            lines.append("")
+            lines.append("[dim]\\[↑↓] mover   \\[Enter] seleccionar[/dim]")
+        self.update("\n".join(lines))
+
+    def action_cursor_up(self) -> None:
+        self.index = (self.index - 1) % len(self.options)
+
+    def action_cursor_down(self) -> None:
+        self.index = (self.index + 1) % len(self.options)
+
+    def action_select(self) -> None:
+        self.post_message(self.Selected(self.options[self.index][0]))
+
+
+class Board(Static, can_focus=True):
+    """Tablero 3x3 con separadores reales. Flechas+Enter o teclas 0-8 juegan."""
+
+    MY_COLOR = "bright_green"
+    OPPONENT_COLOR = "bright_cyan"
+    CURSOR_STYLE = "black on #90ee90"
+    CURSOR_STYLE_WAIT = "white on grey23"
+    WIN_COLOR = "black on green"
+    LOSS_COLOR = "black on red"
+
+    BINDINGS = [
+        Binding("left", "cursor_left", "Izquierda"),
+        Binding("right", "cursor_right", "Derecha"),
+        Binding("up", "cursor_up", "Arriba"),
+        Binding("down", "cursor_down", "Abajo"),
+        Binding("enter", "select", "Jugar", priority=True),
+    ] + [Binding(str(n), f"play({n})", f"Jugar {n}") for n in range(9)]
+
+    cursor = reactive(0)
+
+    class CellSelected(Message):
+        def __init__(self, cell: int) -> None:
+            self.cell = cell
+            super().__init__()
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.cells = ["."] * 9
+        self.interactive = False
+        self.finished = False
+        self.my_symbol = "X"
+        self.winning_line: tuple[int, int, int] | None = None
+        self.own_win = False
+
+    def on_mount(self) -> None:
+        self._render_board()
+
+    def watch_cursor(self) -> None:
+        self._render_board()
+
+    def set_state(self, board_str: str, interactive: bool, my_symbol: str) -> None:
+        self.cells = list(board_str)
+        self.interactive = interactive
+        self.my_symbol = my_symbol
+        self._render_board()
+
+    def set_result(self, winning_line: tuple[int, int, int] | None, own_win: bool) -> None:
+        self.interactive = False
+        self.finished = True
+        self.winning_line = winning_line
+        self.own_win = own_win
+        self._render_board()
+
+    def _render_board(self) -> None:
+        cells_text = []
+        for i in range(9):
+            c = self.cells[i]
+            is_win_cell = bool(self.winning_line and i in self.winning_line)
+            is_cursor = i == self.cursor and not is_win_cell and not self.finished
+
+            if is_win_cell:
+                bg = self.WIN_COLOR if self.own_win else self.LOSS_COLOR
+                content = f"[{bg}] {c} [/{bg}]"
+            elif is_cursor:
+                shown = c if c in ("X", "O") else str(i)
+                style = self.CURSOR_STYLE if self.interactive else self.CURSOR_STYLE_WAIT
+                content = f"[{style}] {shown} [/{style}]"
+            elif c in ("X", "O"):
+                color = self.MY_COLOR if c == self.my_symbol else self.OPPONENT_COLOR
+                content = f" [bold {color}]{c}[/bold {color}] "
+            else:
+                content = f" [dim]{i}[/dim] "
+            cells_text.append(content)
+        divider = "\n[dim]───┼───┼───[/dim]\n"
+        rows = ["│".join(cells_text[r * 3:(r + 1) * 3]) for r in range(3)]
+        self.update(divider.join(rows))
+
+    def action_cursor_left(self) -> None:
+        if not self.finished and self.cursor % 3 > 0:
+            self.cursor -= 1
+
+    def action_cursor_right(self) -> None:
+        if not self.finished and self.cursor % 3 < 2:
+            self.cursor += 1
+
+    def action_cursor_up(self) -> None:
+        if not self.finished and self.cursor >= 3:
+            self.cursor -= 3
+
+    def action_cursor_down(self) -> None:
+        if not self.finished and self.cursor < 6:
+            self.cursor += 3
+
+    def action_select(self) -> None:
+        self._try_play(self.cursor)
+
+    def action_play(self, cell: int) -> None:
+        self.cursor = cell
+        self._try_play(cell)
+
+    def _try_play(self, cell: int) -> None:
+        if self.interactive and self.cells[cell] == ".":
+            self.post_message(self.CellSelected(cell))
+
+
+# ---------------------------------------------------------------------------
+# Pantallas: identidad y estado
+# ---------------------------------------------------------------------------
+
+
+class NameScreen(Screen):
+    """Primera pantalla: pide el nombre antes de conectar al servidor."""
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="main-box"):
+            yield Static(BANNER, id="banner")
+            yield Static("Ingresa tu nombre:", id="name-label")
+            yield Input(placeholder="jugador", id="name-input")
+
+    def on_mount(self) -> None:
+        self.query_one(Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        # sanea igual que el servidor: el protocolo es texto separado por
+        # espacios, un nombre con espacios rompe el parseo de !start/etc.
+        name = re.sub(r"\s+", "_", event.value.strip())[:20]
+        name = name or f"invitado{random.randint(100, 999)}"
+        app: "ShellGamesApp" = self.app  # type: ignore[assignment]
+        app.begin_connection(name)
+
+
+class MainScreen(Screen):
+    def compose(self) -> ComposeResult:
+        with Vertical(id="main-box"):
+            yield Static(BANNER, id="banner")
+            yield Static("", id="conn-status")
+            yield Menu([("play", "Jugar"), ("about", "About"), ("quit", "Quit")], id="menu")
+
+    def on_mount(self) -> None:
+        self.query_one(Menu).display = False
+        self._refresh_conn_status()
+        self.set_interval(0.5, self._refresh_conn_status)
+
+    def _refresh_conn_status(self) -> None:
+        app: "ShellGamesApp" = self.app  # type: ignore[assignment]
+        status = self.query_one("#conn-status", Static)
+        menu = self.query_one(Menu)
+        if app.connected:
+            status.update(f"[green]● conectado como {app.username}[/green]")
+            if not menu.display:
+                menu.display = True
+                menu.focus()
+        else:
+            status.update("[yellow]◌ conectando...[/yellow]")
+            menu.display = False
+
+    def on_menu_selected(self, event: Menu.Selected) -> None:
+        if event.value == "about":
+            self.app.push_screen(AboutScreen())
+        elif event.value == "play":
+            self.app.push_screen(GameSelectScreen())
+        elif event.value == "quit":
+            self.app.action_quit_clean()  # type: ignore[attr-defined]
+
+
+class AboutScreen(Screen):
+    """Misma estructura que MainScreen: banner arriba, info abajo, y un
+    Menu de una opcion (Volver) para regresar."""
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="main-box"):
+            yield Static(BANNER, id="banner")
+            yield Static("Consultando servidor...", id="about-body")
+            yield Menu([("back", "Volver")], id="menu")
+
+    async def on_mount(self) -> None:
+        self.query_one(Menu).focus()
+        body = self.query_one("#about-body", Static)
+        app: "ShellGamesApp" = self.app  # type: ignore[assignment]
+        if not app.connected:
+            body.update(f"[red]Desconectado[/red] de {app.url}")
+            return
+        who = await app.request_who()
+        body.update(f"[green]Conectado[/green] a {app.url}\n\n{who}")
+
+    def on_menu_selected(self, event: Menu.Selected) -> None:
+        if event.value == "back":
+            self.app.pop_screen()
+
+
+# ---------------------------------------------------------------------------
+# Pantallas: 3 en raya
+# ---------------------------------------------------------------------------
+
+
+class GameSelectScreen(Screen):
+    """Elegir el juego. Solo 3 en raya por ahora, listo para sumar mas."""
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="main-box"):
+            yield Static(BANNER, id="banner")
+            yield Menu([("tictactoe", "3 en raya"), ("back", "Volver")], id="menu")
+
+    def on_mount(self) -> None:
+        self.query_one(Menu).focus()
+
+    def on_menu_selected(self, event: Menu.Selected) -> None:
+        if event.value == "tictactoe":
+            self.app.push_screen(PlayMethodScreen())
+        elif event.value == "back":
+            self.app.pop_screen()
+
+
+class PlayMethodScreen(Screen):
+    def compose(self) -> ComposeResult:
+        with Vertical(id="main-box"):
+            yield Static(BANNER, id="banner")
+            yield Menu(
+                [
+                    ("byname", "Invitar por nombre"),
+                    ("code_host", "Crear codigo"),
+                    ("code_join", "Unirme con codigo"),
+                    ("back", "Volver"),
+                ],
+                id="menu",
+            )
+
+    def on_mount(self) -> None:
+        self.query_one(Menu).focus()
+
+    def on_menu_selected(self, event: Menu.Selected) -> None:
+        if event.value == "byname":
+            self.app.push_screen(NameInviteScreen())
+        elif event.value == "code_host":
+            self.app.push_screen(CodeHostScreen())
+        elif event.value == "code_join":
+            self.app.push_screen(CodeJoinScreen())
+        elif event.value == "back":
+            self.app.pop_screen()
+
+
+class NameInviteScreen(Screen):
+    BINDINGS = [Binding("escape", "back", "Volver")]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="main-box"):
+            yield Static(BANNER, id="banner")
+            yield Static("Invita a alguien por su nombre:", id="name-label")
+            yield Input(placeholder="nombre del jugador", id="invite-input")
+            yield Static("", id="invite-status")
+
+    def on_mount(self) -> None:
+        self.query_one(Input).focus()
+        self._wait_task: asyncio.Task | None = None
+
+    def action_back(self) -> None:
+        if self._wait_task:
+            self._wait_task.cancel()
+        self.app.pop_screen()
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        target = event.value.strip()
+        status = self.query_one("#invite-status", Static)
+        if not target:
+            status.update("[red]Escribe un nombre[/red]")
+            return
+        input_widget = self.query_one(Input)
+        input_widget.disabled = True
+        app: "ShellGamesApp" = self.app  # type: ignore[assignment]
+        if not app.connected:
+            status.update("[dim]Conectando al servidor...[/dim]")
+        if not await app.wait_connected():
+            status.update("[red]No se pudo conectar al servidor. Intenta de nuevo.[/red]")
+            input_widget.disabled = False
+            return
+        status.update(f"[dim]Invitando a {target}... esperando respuesta (Esc cancela)[/dim]")
+        await app.send_line(f"/play {target}")
+        self._wait_task = asyncio.create_task(self._await_error(status, input_widget))
+
+    async def _await_error(self, status: Static, input_widget: Input) -> None:
+        app: "ShellGamesApp" = self.app  # type: ignore[assignment]
+        error = await app.error_queue.get()
+        status.update(f"[red]{error}[/red]")
+        input_widget.disabled = False
+        input_widget.value = ""
+        input_widget.focus()
+
+
+class CodeHostScreen(Screen):
+    BINDINGS = [Binding("escape", "back", "Volver")]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="main-box"):
+            yield Static(BANNER, id="banner")
+            yield Static("Conectando...", id="code-status")
+
+    async def on_mount(self) -> None:
+        app: "ShellGamesApp" = self.app  # type: ignore[assignment]
+        status = self.query_one("#code-status", Static)
+        if not app.connected:
+            status.update("[dim]Conectando al servidor...[/dim]")
+        if not await app.wait_connected():
+            status.update("[red]No se pudo conectar al servidor. Esc para volver.[/red]")
+            return
+        status.update("Generando codigo...")
+        await app.send_line("/code")
+        gid, code = await app.code_queue.get()
+        self.gid = gid
+        status = self.query_one("#code-status", Static)
+        status.update(
+            f"Comparte este codigo:\n\n[green bold]{code}[/green bold]\n\n"
+            "[dim]Esperando a que alguien se una... (Esc cancela)[/dim]"
+        )
+
+    def action_back(self) -> None:
+        self.app.pop_screen()
+
+
+class CodeJoinScreen(Screen):
+    BINDINGS = [Binding("escape", "back", "Volver")]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="main-box"):
+            yield Static(BANNER, id="banner")
+            yield Static("Codigo de la partida:", id="name-label")
+            yield Input(placeholder="XXXX", id="code-input")
+            yield Static("", id="invite-status")
+
+    def on_mount(self) -> None:
+        self.query_one(Input).focus()
+        self._wait_task: asyncio.Task | None = None
+
+    def action_back(self) -> None:
+        if self._wait_task:
+            self._wait_task.cancel()
+        self.app.pop_screen()
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        code = event.value.strip().upper()
+        status = self.query_one("#invite-status", Static)
+        if not code:
+            status.update("[red]Escribe un codigo[/red]")
+            return
+        input_widget = self.query_one(Input)
+        input_widget.disabled = True
+        app: "ShellGamesApp" = self.app  # type: ignore[assignment]
+        if not app.connected:
+            status.update("[dim]Conectando al servidor...[/dim]")
+        if not await app.wait_connected():
+            status.update("[red]No se pudo conectar al servidor. Intenta de nuevo.[/red]")
+            input_widget.disabled = False
+            return
+        status.update("[dim]Uniendote...[/dim]")
+        await app.send_line(f"/join {code}")
+        self._wait_task = asyncio.create_task(self._await_error(status, input_widget))
+
+    async def _await_error(self, status: Static, input_widget: Input) -> None:
+        app: "ShellGamesApp" = self.app  # type: ignore[assignment]
+        error = await app.error_queue.get()
+        status.update(f"[red]{error}[/red]")
+        input_widget.disabled = False
+        input_widget.value = ""
+        input_widget.focus()
+
+
+class InvitePopup(ModalScreen):
+    """Notificacion de invitacion entrante, en cualquier pantalla."""
+
+    BINDINGS = [
+        Binding("enter", "accept", "Unirte", priority=True),
+        Binding("escape", "decline", "Rechazar", priority=True),
+    ]
+
+    def __init__(self, gid: str, inviter: str) -> None:
+        super().__init__()
+        self.gid = gid
+        self.inviter = inviter
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="invite-box"):
+            yield Static(f"[bold]{self.inviter} te invito a jugar: 3 en raya[/bold]", id="invite-title")
+            yield Static("[dim]Enter para unirte  ·  Esc para rechazar[/dim]", id="invite-hint")
+
+    async def action_accept(self) -> None:
+        app: "ShellGamesApp" = self.app  # type: ignore[assignment]
+        await app.send_line(f"/accept {self.gid}")
+
+    async def action_decline(self) -> None:
+        app: "ShellGamesApp" = self.app  # type: ignore[assignment]
+        await app.send_line(f"/decline {self.gid}")
+        self.dismiss()
+
+
+class AbandonConfirmScreen(ModalScreen):
+    """Popup de confirmacion antes de abandonar una partida en curso."""
+
+    def __init__(self, gid: str) -> None:
+        super().__init__()
+        self.gid = gid
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="invite-box"):
+            yield Static("[bold]¿Estas seguro de abandonar?[/bold]", id="invite-title")
+            yield Menu(
+                [("no", "No, seguir jugando"), ("yes", "Si, abandonar")],
+                show_hint=False,
+                id="menu",
+            )
+
+    def on_mount(self) -> None:
+        self.query_one(Menu).focus()
+
+    def on_menu_selected(self, event: Menu.Selected) -> None:
+        gid = self.gid
+        self.dismiss()
+        if event.value == "yes":
+            app: "ShellGamesApp" = self.app  # type: ignore[assignment]
+            app.run_worker(app.send_line(f"/forfeit {gid}"))
+
+
+class GameScreen(Screen):
+    BINDINGS = [Binding("q", "confirm_abandon", "Abandonar")]
+
+    def __init__(self, gid: str, opponent: str, symbol: str) -> None:
+        super().__init__()
+        self.gid = gid
+        self.opponent = opponent
+        self.symbol = symbol
+        self.turn = "X"
+        self.finished = False
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="main-box"):
+            yield Static("3 EN RAYA", id="game-title")
+            yield Static(f"vs {self.opponent}", id="game-opponent")
+            yield Board(id="board")
+            yield Static("", id="game-status")
+            yield Static("[dim]Volver \\[q][/dim]", id="quit-hint")
+            yield Menu([("back", "Volver")], show_hint=False, id="menu")
+
+    def on_mount(self) -> None:
+        self.apply_board("." * 9, "X")
+        self.query_one(Board).focus()
+
+    def action_confirm_abandon(self) -> None:
+        if not self.finished:
+            self.app.push_screen(AbandonConfirmScreen(self.gid))
+
+    def _update_status(self) -> None:
+        status = self.query_one("#game-status", Static)
+        if self.finished:
+            return
+        if self.turn == self.symbol:
+            status.update("[green]Tu turno[/green]")
+        else:
+            status.update(f"[dim]Turno de {self.opponent}[/dim]")
+
+    def apply_board(self, board_str: str, turn: str) -> None:
+        self.turn = turn
+        board = self.query_one(Board)
+        board.set_state(board_str, interactive=(turn == self.symbol and not self.finished), my_symbol=self.symbol)
+        self._update_status()
+
+    def _winning_line(self, board: Board) -> tuple[int, int, int] | None:
+        for a, b, c in WIN_LINES:
+            if board.cells[a] != "." and board.cells[a] == board.cells[b] == board.cells[c]:
+                return (a, b, c)
+        return None
+
+    def _finish(self) -> None:
+        self.finished = True
+        self.query_one(Menu).focus()
+
+    def apply_over(self, result: str, reason: str = "normal") -> None:
+        board = self.query_one(Board)
+        won = result == self.symbol
+        line = self._winning_line(board)
+        self._finish()
+        board.set_result(line, own_win=won)
+        status = self.query_one("#game-status", Static)
+        if result == "draw":
+            status.update("[yellow bold]Empate[/yellow bold]")
+        elif reason == "timeout":
+            if won:
+                status.update(f"[green bold]Ganaste[/green bold] — {self.opponent} quedo inactivo")
+            else:
+                status.update("[red bold]Perdiste por inactividad[/red bold]")
+        elif reason == "forfeit":
+            if won:
+                status.update(f"[green bold]Ganaste[/green bold] — {self.opponent} abandono")
+            else:
+                status.update("[yellow bold]Abandonaste la partida[/yellow bold]")
+        elif won:
+            status.update("[green bold]Ganaste![/green bold]")
+        else:
+            status.update(f"[red bold]Perdiste[/red bold] — gano {self.opponent}")
+
+    def apply_opponent_left(self) -> None:
+        self._finish()
+        self.query_one(Board).set_result(None, False)
+        status = self.query_one("#game-status", Static)
+        status.update(f"[red]{self.opponent} se desconecto[/red]")
+
+    def on_board_cell_selected(self, event: Board.CellSelected) -> None:
+        app: "ShellGamesApp" = self.app  # type: ignore[assignment]
+        self.run_worker(app.send_line(f"/move {self.gid} {event.cell}"))
+
+    def on_menu_selected(self, event: Menu.Selected) -> None:
+        if event.value == "back":
+            self.app.pop_screen()
+
+
+# ---------------------------------------------------------------------------
+# App
+# ---------------------------------------------------------------------------
+
+
+class ShellGamesApp(App):
+    CSS = """
+    Screen { align: center middle; background: #0c0e14; }
+    #main-box {
+        width: auto; min-width: 64; height: auto; background: #0c0e14;
+        border: round green; padding: 2 5;
+    }
+    #banner { color: green; text-style: bold; text-align: left; width: auto; margin-bottom: 1; }
+    #conn-status { width: auto; margin-bottom: 1; }
+    Menu { width: auto; height: auto; background: transparent; border: none; margin-top: 1; }
+    Menu:focus { background: transparent; }
+    #about-body { color: white; width: auto; margin-bottom: 1; }
+    #name-label { color: white; width: auto; margin-bottom: 1; }
+    #invite-status { color: white; width: auto; margin-top: 1; }
+    #code-status { color: white; width: auto; }
+    #game-title { color: green; text-style: bold; width: 100%; text-align: center; }
+    #game-opponent { color: white; width: 100%; text-align: center; margin-bottom: 1; }
+    #game-status { color: white; width: 100%; text-align: center; margin: 1 0; }
+    #quit-hint { width: 100%; text-align: center; margin-top: 1; }
+    Board { width: 100%; height: auto; background: transparent; margin-bottom: 1; content-align: center middle; }
+    Input { background: transparent; border: round green; width: 44; }
+    Input:focus { border: round green; }
+    InvitePopup { align: center middle; background: black 60%; }
+    #invite-box { width: auto; height: auto; border: round green; padding: 1 4; background: #14161f; }
+    #invite-title { width: auto; margin-bottom: 1; }
+    #invite-hint { width: auto; }
+    """
+
+    def __init__(self, url: str = DEFAULT_URL) -> None:
+        super().__init__()
+        self.url = url
+        self.ws = None
+        self.connected = False
+        self.username: str | None = None
+        self.connected_event = asyncio.Event()
+        self._who_queue: "asyncio.Queue[str]" = asyncio.Queue()
+        self.error_queue: "asyncio.Queue[str]" = asyncio.Queue()
+        self.code_queue: "asyncio.Queue[tuple[str, str]]" = asyncio.Queue()
+
+    def on_mount(self) -> None:
+        self.push_screen(NameScreen())
+
+    def begin_connection(self, username: str) -> None:
+        self.switch_screen(MainScreen())
+        self.run_worker(self._connect_loop(username), exclusive=True)
+
+    async def send_line(self, text: str) -> None:
+        if self.ws is not None:
+            try:
+                await self.ws.send(text)
+            except Exception:
+                pass
+
+    async def wait_connected(self, timeout: float = 8) -> bool:
+        """Espera a que la conexion este lista. Devuelve False si expira el timeout."""
+        try:
+            await asyncio.wait_for(self.connected_event.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
+
+    async def _connect_loop(self, username: str) -> None:
+        while True:
+            try:
+                async with connect(self.url, open_timeout=10) as ws:
+                    self.ws = ws
+                    await asyncio.wait_for(ws.recv(), timeout=10)  # "Nombre: "
+                    self.username = username
+                    await ws.send(username)
+                    await asyncio.wait_for(ws.recv(), timeout=10)  # "Conectado como ..."
+                    self.connected = True
+                    self.connected_event.set()
+                    async for raw in ws:
+                        self._dispatch(raw.strip())
+            except Exception:
+                pass
+            finally:
+                self.connected = False
+                self.connected_event.clear()
+                self.ws = None
+            await asyncio.sleep(2)  # reintenta la conexion
+
+    def _dispatch(self, msg: str) -> None:
+        if msg.startswith("* conectados"):
+            self._who_queue.put_nowait(msg)
+        elif msg.startswith("!invite "):
+            _, gid, inviter = msg.split(maxsplit=2)
+            self.push_screen(InvitePopup(gid, inviter))
+        elif msg.startswith("!start "):
+            _, gid, opponent, symbol = msg.split()
+            self.switch_screen(GameScreen(gid, opponent, symbol))
+        elif msg.startswith("!board "):
+            _, gid, board, turn = msg.split()
+            if isinstance(self.screen, GameScreen) and self.screen.gid == gid:
+                self.screen.apply_board(board, turn)
+        elif msg.startswith("!over "):
+            parts = msg.split()
+            gid, result = parts[1], parts[2]
+            reason = parts[3] if len(parts) > 3 else "normal"
+            if isinstance(self.screen, GameScreen) and self.screen.gid == gid:
+                self.screen.apply_over(result, reason)
+        elif msg.startswith("!opponent_left "):
+            _, gid = msg.split()
+            if isinstance(self.screen, GameScreen) and self.screen.gid == gid:
+                self.screen.apply_opponent_left()
+        elif msg.startswith("!code "):
+            _, gid, code = msg.split()
+            self.code_queue.put_nowait((gid, code))
+        elif msg.startswith("!error "):
+            self.error_queue.put_nowait(msg[len("!error "):])
+        elif msg.startswith("!declined "):
+            _, gid, who = msg.split()
+            self.error_queue.put_nowait(f"{who} rechazo la invitacion")
+        elif msg.startswith("!invited "):
+            pass  # confirmacion silenciosa
+
+    async def request_who(self) -> str:
+        if not self.connected or self.ws is None:
+            return "Desconectado del servidor."
+        await self.ws.send("/who")
+        try:
+            return await asyncio.wait_for(self._who_queue.get(), timeout=5)
+        except asyncio.TimeoutError:
+            return "Sin respuesta del servidor."
+
+    def action_quit_clean(self) -> None:
+        async def _quit() -> None:
+            if self.ws is not None:
+                try:
+                    await self.ws.send("/quit")
+                except Exception:
+                    pass
+            self.exit()
+
+        self.run_worker(_quit())
+
+
+if __name__ == "__main__":
+    url = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_URL
+    ShellGamesApp(url).run()
+    os.system("clear")

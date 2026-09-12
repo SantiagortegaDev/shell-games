@@ -4,3 +4,4 @@ __pycache__/
 deploy/cloudflared
 deploy/*.json
 venv/
+tmux-*.log
