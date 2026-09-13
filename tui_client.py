@@ -15,9 +15,11 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Input, Static
 from websockets.asyncio.client import connect
 
-from games import WIN_LINES
+from games import BOARD_SIZE, HANGMAN_MAX_MISSES, SHIP_SIZES, WIN_LINES
 
 DEFAULT_URL = "wss://shellgames.santiagortega.dev"
+
+GAME_NAMES = {"ttt": "3 en raya", "hangman": "Ahorcado", "battleship": "Batalla naval"}
 
 BANNER = r"""   _____ __         ____   ______
   / ___// /_  ___  / / /  / ____/___ _____ ___  ___  _____
@@ -280,24 +282,36 @@ class AboutScreen(Screen):
 
 
 class GameSelectScreen(Screen):
-    """Elegir el juego. Solo 3 en raya por ahora, listo para sumar mas."""
+    """Elegir el juego."""
 
     def compose(self) -> ComposeResult:
         with Vertical(id="main-box"):
             yield Static(BANNER, id="banner")
-            yield Menu([("tictactoe", "3 en raya"), ("back", "Volver")], id="menu")
+            yield Menu(
+                [
+                    ("ttt", "3 en raya"),
+                    ("hangman", "Ahorcado"),
+                    ("battleship", "Batalla naval"),
+                    ("back", "Volver"),
+                ],
+                id="menu",
+            )
 
     def on_mount(self) -> None:
         self.query_one(Menu).focus()
 
     def on_menu_selected(self, event: Menu.Selected) -> None:
-        if event.value == "tictactoe":
-            self.app.push_screen(PlayMethodScreen())
-        elif event.value == "back":
+        if event.value == "back":
             self.app.pop_screen()
+        else:
+            self.app.push_screen(PlayMethodScreen(event.value))
 
 
 class PlayMethodScreen(Screen):
+    def __init__(self, kind: str) -> None:
+        super().__init__()
+        self.kind = kind
+
     def compose(self) -> ComposeResult:
         with Vertical(id="main-box"):
             yield Static(BANNER, id="banner")
@@ -316,9 +330,9 @@ class PlayMethodScreen(Screen):
 
     def on_menu_selected(self, event: Menu.Selected) -> None:
         if event.value == "byname":
-            self.app.push_screen(NameInviteScreen())
+            self.app.push_screen(NameInviteScreen(self.kind))
         elif event.value == "code_host":
-            self.app.push_screen(CodeHostScreen())
+            self.app.push_screen(CodeHostScreen(self.kind))
         elif event.value == "code_join":
             self.app.push_screen(CodeJoinScreen())
         elif event.value == "back":
@@ -327,6 +341,10 @@ class PlayMethodScreen(Screen):
 
 class NameInviteScreen(Screen):
     BINDINGS = [Binding("escape", "back", "Volver")]
+
+    def __init__(self, kind: str) -> None:
+        super().__init__()
+        self.kind = kind
 
     def compose(self) -> ComposeResult:
         with Vertical(id="main-box"):
@@ -360,7 +378,7 @@ class NameInviteScreen(Screen):
             input_widget.disabled = False
             return
         status.update(f"[dim]Invitando a {target}... esperando respuesta (Esc cancela)[/dim]")
-        await app.send_line(f"/play {target}")
+        await app.send_line(f"/play {target} {self.kind}")
         self._wait_task = asyncio.create_task(self._await_error(status, input_widget))
 
     async def _await_error(self, status: Static, input_widget: Input) -> None:
@@ -374,6 +392,10 @@ class NameInviteScreen(Screen):
 
 class CodeHostScreen(Screen):
     BINDINGS = [Binding("escape", "back", "Volver")]
+
+    def __init__(self, kind: str) -> None:
+        super().__init__()
+        self.kind = kind
 
     def compose(self) -> ComposeResult:
         with Vertical(id="main-box"):
@@ -389,7 +411,7 @@ class CodeHostScreen(Screen):
             status.update("[red]No se pudo conectar al servidor. Esc para volver.[/red]")
             return
         status.update("Generando codigo...")
-        await app.send_line("/code")
+        await app.send_line(f"/code {self.kind}")
         gid, code = await app.code_queue.get()
         self.gid = gid
         status = self.query_one("#code-status", Static)
@@ -457,14 +479,16 @@ class InvitePopup(ModalScreen):
         Binding("escape", "decline", "Rechazar", priority=True),
     ]
 
-    def __init__(self, gid: str, inviter: str) -> None:
+    def __init__(self, gid: str, inviter: str, kind: str) -> None:
         super().__init__()
         self.gid = gid
         self.inviter = inviter
+        self.kind = kind
 
     def compose(self) -> ComposeResult:
+        game_name = GAME_NAMES.get(self.kind, self.kind)
         with Vertical(id="invite-box"):
-            yield Static(f"[bold]{self.inviter} te invito a jugar: 3 en raya[/bold]", id="invite-title")
+            yield Static(f"[bold]{self.inviter} te invito a jugar: {game_name}[/bold]", id="invite-title")
             yield Static("[dim]Enter para unirte  ·  Esc para rechazar[/dim]", id="invite-hint")
 
     async def action_accept(self) -> None:
@@ -597,6 +621,368 @@ class GameScreen(Screen):
 
 
 # ---------------------------------------------------------------------------
+# Pantallas: ahorcado
+# ---------------------------------------------------------------------------
+
+
+class HangmanScreen(Screen):
+    BINDINGS = [Binding("q", "confirm_abandon", "Abandonar")]
+
+    def __init__(self, gid: str, opponent: str, role: str) -> None:
+        super().__init__()
+        self.gid = gid
+        self.opponent = opponent
+        self.role = role  # "setter" o "guesser"
+        self.finished = False
+        self.word_set = False
+        self._error_task: asyncio.Task | None = None
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="main-box"):
+            yield Static("AHORCADO", id="game-title")
+            yield Static(f"vs {self.opponent}", id="game-opponent")
+            yield Static("", id="hm-word")
+            yield Static("", id="hm-misses")
+            yield Static("", id="game-status")
+            yield Input(id="hm-input")
+            yield Static("[dim]Volver \\[q][/dim]", id="quit-hint")
+            yield Menu([("back", "Volver")], show_hint=False, id="menu")
+
+    def on_mount(self) -> None:
+        input_widget = self.query_one("#hm-input", Input)
+        if self.role == "setter":
+            input_widget.placeholder = "escribe la palabra secreta"
+            self.query_one("#hm-word", Static).update("Elegi una palabra para que tu rival adivine")
+            input_widget.focus()
+        else:
+            input_widget.placeholder = "una letra"
+            input_widget.disabled = True
+            self.query_one("#hm-word", Static).update("[dim]Esperando que el rival elija la palabra...[/dim]")
+        self._error_task = asyncio.create_task(self._watch_errors())
+
+    async def _watch_errors(self) -> None:
+        app: "ShellGamesApp" = self.app  # type: ignore[assignment]
+        while True:
+            error = await app.error_queue.get()
+            if not self.finished:
+                self.query_one("#game-status", Static).update(f"[red]{error}[/red]")
+
+    def action_confirm_abandon(self) -> None:
+        if not self.finished:
+            self.app.push_screen(AbandonConfirmScreen(self.gid))
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        value = event.value.strip().lower()
+        input_widget = self.query_one("#hm-input", Input)
+        app: "ShellGamesApp" = self.app  # type: ignore[assignment]
+        if self.role == "setter" and not self.word_set:
+            if not value.isalpha() or not (3 <= len(value) <= 20):
+                self.query_one("#game-status", Static).update("[red]Solo letras, entre 3 y 20[/red]")
+                return
+            await app.send_line(f"/hangword {self.gid} {value}")
+            input_widget.value = ""
+        elif self.role == "guesser" and self.word_set and not self.finished:
+            letter = value[:1]
+            if not letter.isalpha():
+                self.query_one("#game-status", Static).update("[red]Escribe una letra[/red]")
+                return
+            await app.send_line(f"/guess {self.gid} {letter}")
+            input_widget.value = ""
+
+    def apply_state(self, revealed: str, misses: int) -> None:
+        self.word_set = True
+        self.query_one("#hm-word", Static).update(f"[bold]{' '.join(revealed.upper())}[/bold]")
+        self.query_one("#hm-misses", Static).update(f"Fallos: {misses}/{HANGMAN_MAX_MISSES}")
+        input_widget = self.query_one("#hm-input", Input)
+        status = self.query_one("#game-status", Static)
+        if self.finished:
+            return
+        if self.role == "setter":
+            input_widget.disabled = True
+            status.update(f"[dim]Esperando que {self.opponent} adivine...[/dim]")
+        else:
+            input_widget.disabled = False
+            status.update("[green]Adivina una letra[/green]")
+            input_widget.focus()
+
+    def _finish(self) -> None:
+        self.finished = True
+        if self._error_task:
+            self._error_task.cancel()
+        self.query_one("#hm-input", Input).disabled = True
+        self.query_one(Menu).focus()
+
+    def apply_over(self, result: str, reason: str = "normal") -> None:
+        self._finish()
+        won = result == self.role
+        status = self.query_one("#game-status", Static)
+        if reason == "timeout":
+            if won:
+                status.update(f"[green bold]Ganaste[/green bold] — {self.opponent} quedo inactivo")
+            else:
+                status.update("[red bold]Perdiste por inactividad[/red bold]")
+        elif reason == "forfeit":
+            if won:
+                status.update(f"[green bold]Ganaste[/green bold] — {self.opponent} abandono")
+            else:
+                status.update("[yellow bold]Abandonaste la partida[/yellow bold]")
+        elif won:
+            status.update("[green bold]Ganaste![/green bold]")
+        else:
+            status.update("[red bold]Perdiste[/red bold]")
+
+    def apply_opponent_left(self) -> None:
+        self._finish()
+        self.query_one("#game-status", Static).update(f"[red]{self.opponent} se desconecto[/red]")
+
+    def on_menu_selected(self, event: Menu.Selected) -> None:
+        if event.value == "back":
+            self.app.pop_screen()
+
+
+# ---------------------------------------------------------------------------
+# Pantallas: batalla naval
+# ---------------------------------------------------------------------------
+
+
+class BSBoard(Static, can_focus=True):
+    """Tablero 8x8 de batalla naval, navegable con flechas."""
+
+    CURSOR_STYLE = "black on #90ee90"
+
+    BINDINGS = [
+        Binding("left", "cursor_left", "Izquierda"),
+        Binding("right", "cursor_right", "Derecha"),
+        Binding("up", "cursor_up", "Arriba"),
+        Binding("down", "cursor_down", "Abajo"),
+        Binding("enter", "select", "Confirmar", priority=True),
+        Binding("r", "rotate", "Rotar"),
+    ]
+
+    cursor = reactive(0)
+
+    class CellSelected(Message):
+        def __init__(self, row: int, col: int) -> None:
+            self.row = row
+            self.col = col
+            super().__init__()
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.cells = ["."] * (BOARD_SIZE * BOARD_SIZE)
+        self.interactive = False
+        self.show_own = True  # True: tablero propio (con barcos); False: seguimiento del rival
+        self.ghost_len = 0  # largo del barco a previsualizar (fase de colocacion)
+        self.orientation = "h"
+
+    def on_mount(self) -> None:
+        self._render_board()
+
+    def watch_cursor(self) -> None:
+        self._render_board()
+
+    def set_cells(self, cells_str: str, interactive: bool) -> None:
+        self.cells = list(cells_str)
+        self.interactive = interactive
+        self._render_board()
+
+    def action_rotate(self) -> None:
+        self.orientation = "v" if self.orientation == "h" else "h"
+        self._render_board()
+
+    def _ghost_cells(self) -> set[int]:
+        if not self.ghost_len:
+            return set()
+        row, col = divmod(self.cursor, BOARD_SIZE)
+        out = set()
+        for i in range(self.ghost_len):
+            r = row + (i if self.orientation == "v" else 0)
+            c = col + (i if self.orientation == "h" else 0)
+            if 0 <= r < BOARD_SIZE and 0 <= c < BOARD_SIZE:
+                out.add(r * BOARD_SIZE + c)
+        return out
+
+    def _render_board(self) -> None:
+        ghost = self._ghost_cells()
+        lines = []
+        for row in range(BOARD_SIZE):
+            cells_text = []
+            for col in range(BOARD_SIZE):
+                idx = row * BOARD_SIZE + col
+                c = self.cells[idx]
+                if c == "X":
+                    ch = "[bold red]X[/bold red]"
+                elif c == "o":
+                    ch = "[dim]o[/dim]"
+                elif c == "S" and self.show_own:
+                    ch = "[bright_green]S[/bright_green]"
+                else:
+                    ch = "[dim]·[/dim]"
+                if self.interactive and idx == self.cursor:
+                    ch = f"[{self.CURSOR_STYLE}]{c if c in ('X','o') else '+'}[/{self.CURSOR_STYLE}]"
+                elif self.interactive and idx in ghost:
+                    ch = "[black on #90ee90]~[/black on #90ee90]"
+                cells_text.append(ch)
+            lines.append(" ".join(cells_text))
+        self.update("\n".join(lines))
+
+    def action_cursor_left(self) -> None:
+        if self.interactive and self.cursor % BOARD_SIZE > 0:
+            self.cursor -= 1
+
+    def action_cursor_right(self) -> None:
+        if self.interactive and self.cursor % BOARD_SIZE < BOARD_SIZE - 1:
+            self.cursor += 1
+
+    def action_cursor_up(self) -> None:
+        if self.interactive and self.cursor >= BOARD_SIZE:
+            self.cursor -= BOARD_SIZE
+
+    def action_cursor_down(self) -> None:
+        if self.interactive and self.cursor < BOARD_SIZE * (BOARD_SIZE - 1):
+            self.cursor += BOARD_SIZE
+
+    def action_select(self) -> None:
+        if not self.interactive:
+            return
+        row, col = divmod(self.cursor, BOARD_SIZE)
+        self.post_message(self.CellSelected(row, col))
+
+
+class BattleshipScreen(Screen):
+    BINDINGS = [Binding("q", "confirm_abandon", "Abandonar")]
+
+    def __init__(self, gid: str, opponent: str, symbol: str) -> None:
+        super().__init__()
+        self.gid = gid
+        self.opponent = opponent
+        self.symbol = symbol
+        self.finished = False
+        self.phase = "placing"
+        self.next_ship = 0
+        self._error_task: asyncio.Task | None = None
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="main-box"):
+            yield Static("BATALLA NAVAL", id="game-title")
+            yield Static(f"vs {self.opponent}", id="game-opponent")
+            yield Static("", id="game-status")
+            yield BSBoard(id="board")
+            yield Static("[dim]Volver \\[q][/dim]", id="quit-hint")
+            yield Menu([("back", "Volver")], show_hint=False, id="menu")
+
+    def on_mount(self) -> None:
+        board = self.query_one(BSBoard)
+        board.interactive = True
+        board.ghost_len = SHIP_SIZES[0]
+        board.focus()
+        self._update_status()
+        self._error_task = asyncio.create_task(self._watch_errors())
+
+    async def _watch_errors(self) -> None:
+        app: "ShellGamesApp" = self.app  # type: ignore[assignment]
+        while True:
+            error = await app.error_queue.get()
+            if not self.finished:
+                self.query_one("#game-status", Static).update(f"[red]{error}[/red]")
+
+    def _update_status(self) -> None:
+        if self.finished:
+            return
+        status = self.query_one("#game-status", Static)
+        if self.phase == "placing":
+            if self.next_ship < len(SHIP_SIZES):
+                size = SHIP_SIZES[self.next_ship]
+                status.update(f"Coloca tu barco de {size} ({self.next_ship + 1}/{len(SHIP_SIZES)}) — [dim]r rota[/dim]")
+            else:
+                status.update("[dim]Esperando que termine el rival de colocar...[/dim]")
+
+    def action_confirm_abandon(self) -> None:
+        if not self.finished:
+            self.app.push_screen(AbandonConfirmScreen(self.gid))
+
+    def on_bsboard_cell_selected(self, event: BSBoard.CellSelected) -> None:
+        app: "ShellGamesApp" = self.app  # type: ignore[assignment]
+        board = self.query_one(BSBoard)
+        if self.phase == "placing":
+            if self.next_ship >= len(SHIP_SIZES):
+                return
+            self.run_worker(
+                app.send_line(f"/place {self.gid} {self.next_ship} {event.row} {event.col} {board.orientation}")
+            )
+        else:
+            self.run_worker(app.send_line(f"/shot {self.gid} {event.row} {event.col}"))
+
+    def _ships_completed(self, own: str) -> int:
+        """Cuenta cuantos barcos propios ya estan colocados, a partir del
+        tablero que manda el servidor (fuente de verdad, no un contador local
+        que podria desincronizarse con la red)."""
+        placed_cells = own.count("S") + own.count("X")
+        total = 0
+        count = 0
+        for size in SHIP_SIZES:
+            total += size
+            if placed_cells >= total:
+                count += 1
+            else:
+                break
+        return count
+
+    def apply_state(self, own: str, tracking: str, phase: str, turn_symbol: str) -> None:
+        board = self.query_one(BSBoard)
+        if phase == "placing":
+            self.next_ship = self._ships_completed(own)
+            board.ghost_len = SHIP_SIZES[self.next_ship] if self.next_ship < len(SHIP_SIZES) else 0
+            board.show_own = True
+            board.set_cells(own, interactive=self.next_ship < len(SHIP_SIZES))
+            self._update_status()
+            return
+        if self.phase != "battle":
+            self.phase = "battle"
+            board.show_own = False
+            board.ghost_len = 0
+        my_turn = turn_symbol == self.symbol
+        board.set_cells(tracking, interactive=my_turn and not self.finished)
+        status = self.query_one("#game-status", Static)
+        if not self.finished:
+            status.update("[green]Tu turno: elige donde disparar[/green]" if my_turn else f"[dim]Turno de {self.opponent}[/dim]")
+
+    def _finish(self) -> None:
+        self.finished = True
+        if self._error_task:
+            self._error_task.cancel()
+        self.query_one(BSBoard).interactive = False
+        self.query_one(Menu).focus()
+
+    def apply_over(self, result: str, reason: str = "normal") -> None:
+        self._finish()
+        won = result == self.symbol
+        status = self.query_one("#game-status", Static)
+        if reason == "timeout":
+            if won:
+                status.update(f"[green bold]Ganaste[/green bold] — {self.opponent} quedo inactivo")
+            else:
+                status.update("[red bold]Perdiste por inactividad[/red bold]")
+        elif reason == "forfeit":
+            if won:
+                status.update(f"[green bold]Ganaste[/green bold] — {self.opponent} abandono")
+            else:
+                status.update("[yellow bold]Abandonaste la partida[/yellow bold]")
+        elif won:
+            status.update("[green bold]Hundiste toda la flota rival![/green bold]")
+        else:
+            status.update("[red bold]Tu flota fue hundida[/red bold]")
+
+    def apply_opponent_left(self) -> None:
+        self._finish()
+        self.query_one("#game-status", Static).update(f"[red]{self.opponent} se desconecto[/red]")
+
+    def on_menu_selected(self, event: Menu.Selected) -> None:
+        if event.value == "back":
+            self.app.pop_screen()
+
+
+# ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
 
@@ -621,6 +1007,9 @@ class ShellGamesApp(App):
     #game-status { color: white; width: 100%; text-align: center; margin: 1 0; }
     #quit-hint { width: 100%; text-align: center; margin-top: 1; }
     Board { width: 100%; height: auto; background: transparent; margin-bottom: 1; content-align: center middle; }
+    #hm-word { width: 100%; text-align: center; color: white; margin: 1 0; }
+    #hm-misses { width: 100%; text-align: center; color: yellow; margin-bottom: 1; }
+    BSBoard { width: 100%; height: auto; background: transparent; margin-bottom: 1; content-align: center middle; }
     Input { background: transparent; border: round green; width: 44; }
     Input:focus { border: round green; }
     InvitePopup { align: center middle; background: black 60%; }
@@ -684,27 +1073,41 @@ class ShellGamesApp(App):
             await asyncio.sleep(2)  # reintenta la conexion
 
     def _dispatch(self, msg: str) -> None:
+        game_screens = (GameScreen, HangmanScreen, BattleshipScreen)
         if msg.startswith("* conectados"):
             self._who_queue.put_nowait(msg)
         elif msg.startswith("!invite "):
-            _, gid, inviter = msg.split(maxsplit=2)
-            self.push_screen(InvitePopup(gid, inviter))
+            _, gid, inviter, kind = msg.split()
+            self.push_screen(InvitePopup(gid, inviter, kind))
         elif msg.startswith("!start "):
-            _, gid, opponent, symbol = msg.split()
-            self.switch_screen(GameScreen(gid, opponent, symbol))
+            _, gid, opponent, symbol, kind = msg.split()
+            if kind == "hangman":
+                self.switch_screen(HangmanScreen(gid, opponent, symbol))
+            elif kind == "battleship":
+                self.switch_screen(BattleshipScreen(gid, opponent, symbol))
+            else:
+                self.switch_screen(GameScreen(gid, opponent, symbol))
         elif msg.startswith("!board "):
             _, gid, board, turn = msg.split()
             if isinstance(self.screen, GameScreen) and self.screen.gid == gid:
                 self.screen.apply_board(board, turn)
+        elif msg.startswith("!hm_state "):
+            _, gid, revealed, misses = msg.split()
+            if isinstance(self.screen, HangmanScreen) and self.screen.gid == gid:
+                self.screen.apply_state(revealed, int(misses))
+        elif msg.startswith("!bs_state "):
+            _, gid, own, tracking, phase, turn_symbol = msg.split()
+            if isinstance(self.screen, BattleshipScreen) and self.screen.gid == gid:
+                self.screen.apply_state(own, tracking, phase, turn_symbol)
         elif msg.startswith("!over "):
             parts = msg.split()
             gid, result = parts[1], parts[2]
             reason = parts[3] if len(parts) > 3 else "normal"
-            if isinstance(self.screen, GameScreen) and self.screen.gid == gid:
+            if isinstance(self.screen, game_screens) and self.screen.gid == gid:
                 self.screen.apply_over(result, reason)
         elif msg.startswith("!opponent_left "):
             _, gid = msg.split()
-            if isinstance(self.screen, GameScreen) and self.screen.gid == gid:
+            if isinstance(self.screen, game_screens) and self.screen.gid == gid:
                 self.screen.apply_opponent_left()
         elif msg.startswith("!code "):
             _, gid, code = msg.split()

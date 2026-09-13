@@ -11,7 +11,10 @@ import time
 import websockets
 from websockets.asyncio.server import ServerConnection, serve
 
-from games import TicTacToe, check_winner
+from games import Battleship, Hangman, TicTacToe, check_winner
+
+Game = TicTacToe | Hangman | Battleship
+GAME_CLASSES = {"ttt": TicTacToe, "hangman": Hangman, "battleship": Battleship}
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("server")
@@ -24,7 +27,7 @@ INVITE_RATE_WINDOW = 60.0
 INACTIVITY_TIMEOUT = 120.0
 
 players: dict[ServerConnection, str] = {}
-games: dict[str, TicTacToe] = {}
+games: dict[str, Game] = {}
 codes: dict[str, str] = {}  # codigo corto -> game_id
 invite_times: dict[ServerConnection, list[float]] = {}
 watchdogs: dict[str, asyncio.Task] = {}  # game_id -> timer de inactividad
@@ -102,7 +105,10 @@ async def _watchdog(gid: str) -> None:
     game = games.get(gid)
     if game is None or not game.started:
         return
-    winner_symbol = "O" if game.turn == "X" else "X"
+    loser_ws = game.whose_turn_ws()
+    if loser_ws is None:
+        return
+    winner_symbol = game.symbol_for(game.opponent_of(loser_ws))
     for ws in game.players:
         await send(ws, f"!over {gid} {winner_symbol} timeout")
     games.pop(gid, None)
@@ -141,30 +147,39 @@ async def handle_game_command(ws: ServerConnection, name: str, msg: str) -> bool
     parts = msg.split()
     cmd = parts[0]
 
-    if cmd == "/play" and len(parts) == 2:
+    if cmd == "/play" and len(parts) == 3:
         if is_in_active_game(ws):
             await send(ws, "!error ya estas jugando una partida")
             return True
         if not invite_rate_ok(ws):
             await send(ws, "!error estas invitando muy rapido, espera un poco")
             return True
-        target_name = parts[1]
+        target_name, kind = parts[1], parts[2]
+        game_cls = GAME_CLASSES.get(kind)
+        if game_cls is None:
+            await send(ws, "!error juego invalido")
+            return True
         target_ws = find_ws_by_name(target_name)
         if target_ws is None or target_ws is ws:
             await send(ws, "!error jugador no encontrado")
             return True
         gid = new_game_id()
-        games[gid] = TicTacToe(gid, ws, name)
-        await send(target_ws, f"!invite {gid} {name}")
+        games[gid] = game_cls(gid, ws, name)
+        await send(target_ws, f"!invite {gid} {name} {kind}")
         await send(ws, f"!invited {gid} {target_name}")
         return True
 
-    if cmd == "/code" and len(parts) == 1:
+    if cmd == "/code" and len(parts) == 2:
         if is_in_active_game(ws):
             await send(ws, "!error ya estas jugando una partida")
             return True
+        kind = parts[1]
+        game_cls = GAME_CLASSES.get(kind)
+        if game_cls is None:
+            await send(ws, "!error juego invalido")
+            return True
         gid = new_game_id()
-        games[gid] = TicTacToe(gid, ws, name)
+        games[gid] = game_cls(gid, ws, name)
         code = new_code()
         codes[code] = gid
         await send(ws, f"!code {gid} {code}")
@@ -184,8 +199,9 @@ async def handle_game_command(ws: ServerConnection, name: str, msg: str) -> bool
         game.add_guest(ws, name)
         for pws in game.players:
             opp = game.name_for(game.opponent_of(pws))
-            await send(pws, f"!start {gid} {opp} {game.symbol_for(pws)}")
-        schedule_watchdog(gid)
+            await send(pws, f"!start {gid} {opp} {game.symbol_for(pws)} {game.kind}")
+        if game.kind != "battleship":
+            schedule_watchdog(gid)
         return True
 
     if cmd == "/accept" and len(parts) == 2:
@@ -200,8 +216,9 @@ async def handle_game_command(ws: ServerConnection, name: str, msg: str) -> bool
         game.add_guest(ws, name)
         for pws in game.players:
             opp = game.name_for(game.opponent_of(pws))
-            await send(pws, f"!start {gid} {opp} {game.symbol_for(pws)}")
-        schedule_watchdog(gid)
+            await send(pws, f"!start {gid} {opp} {game.symbol_for(pws)} {game.kind}")
+        if game.kind != "battleship":
+            schedule_watchdog(gid)
         return True
 
     if cmd == "/decline" and len(parts) == 2:
@@ -215,7 +232,7 @@ async def handle_game_command(ws: ServerConnection, name: str, msg: str) -> bool
     if cmd == "/move" and len(parts) == 3:
         gid = parts[1]
         game = games.get(gid)
-        if game is None or ws not in game.players:
+        if game is None or ws not in game.players or game.kind != "ttt":
             await send(ws, "!error partida invalida")
             return True
         try:
@@ -230,6 +247,98 @@ async def handle_game_command(ws: ServerConnection, name: str, msg: str) -> bool
         await broadcast_board(game)
         return True
 
+    if cmd == "/hangword" and len(parts) >= 3:
+        gid = parts[1]
+        game = games.get(gid)
+        if game is None or ws not in game.players or game.kind != "hangman":
+            await send(ws, "!error partida invalida")
+            return True
+        word = " ".join(parts[2:])
+        error = game.set_word(ws, word)
+        if error:
+            await send(ws, f"!error {error}")
+            return True
+        for pws in game.players:
+            await send(pws, f"!hm_state {gid} {game.revealed()} {game.misses}")
+        schedule_watchdog(gid)
+        return True
+
+    if cmd == "/guess" and len(parts) == 3:
+        gid = parts[1]
+        game = games.get(gid)
+        if game is None or ws not in game.players or game.kind != "hangman":
+            await send(ws, "!error partida invalida")
+            return True
+        error = game.guess(ws, parts[2])
+        if error:
+            await send(ws, f"!error {error}")
+            return True
+        result = game.result()
+        if result is not None:
+            cancel_watchdog(gid)
+            for pws in game.players:
+                await send(pws, f"!hm_state {gid} {game.word} {game.misses}")
+                await send(pws, f"!over {gid} {result} normal")
+            games.pop(gid, None)
+        else:
+            for pws in game.players:
+                await send(pws, f"!hm_state {gid} {game.revealed()} {game.misses}")
+            schedule_watchdog(gid)
+        return True
+
+    if cmd == "/place" and len(parts) == 6:
+        gid = parts[1]
+        game = games.get(gid)
+        if game is None or ws not in game.players or game.kind != "battleship":
+            await send(ws, "!error partida invalida")
+            return True
+        try:
+            ship_index, row, col = int(parts[2]), int(parts[3]), int(parts[4])
+        except ValueError:
+            await send(ws, "!error datos invalidos")
+            return True
+        orientation = parts[5]
+        error = game.place_ship(ws, ship_index, row, col, orientation)
+        if error:
+            await send(ws, f"!error {error}")
+            return True
+        for pws in game.players:
+            await send(pws, f"!bs_state {gid} {game.own_board_str(pws)} {game.tracking_board_str(pws)} placing -")
+        if game.both_ready():
+            game.start_battle()
+            for pws in game.players:
+                await send(pws, f"!bs_state {gid} {game.own_board_str(pws)} {game.tracking_board_str(pws)} battle {game.symbol_for(game.turn)}")
+            schedule_watchdog(gid)
+        return True
+
+    if cmd == "/shot" and len(parts) == 4:
+        gid = parts[1]
+        game = games.get(gid)
+        if game is None or ws not in game.players or game.kind != "battleship":
+            await send(ws, "!error partida invalida")
+            return True
+        try:
+            row, col = int(parts[2]), int(parts[3])
+        except ValueError:
+            await send(ws, "!error coordenada invalida")
+            return True
+        error, _result = game.shoot(ws, row, col)
+        if error:
+            await send(ws, f"!error {error}")
+            return True
+        winner = game.check_winner()
+        if winner is not None:
+            cancel_watchdog(gid)
+            for pws in game.players:
+                await send(pws, f"!bs_state {gid} {game.own_board_str(pws)} {game.tracking_board_str(pws)} battle -")
+                await send(pws, f"!over {gid} {winner} normal")
+            games.pop(gid, None)
+        else:
+            for pws in game.players:
+                await send(pws, f"!bs_state {gid} {game.own_board_str(pws)} {game.tracking_board_str(pws)} battle {game.symbol_for(game.turn)}")
+            schedule_watchdog(gid)
+        return True
+
     if cmd == "/forfeit" and len(parts) == 2:
         gid = parts[1]
         game = games.get(gid)
@@ -237,7 +346,7 @@ async def handle_game_command(ws: ServerConnection, name: str, msg: str) -> bool
             await send(ws, "!error partida invalida")
             return True
         cancel_watchdog(gid)
-        winner_symbol = "O" if game.symbol_for(ws) == "X" else "X"
+        winner_symbol = game.symbol_for(game.opponent_of(ws))
         for pws in game.players:
             await send(pws, f"!over {gid} {winner_symbol} forfeit")
         games.pop(gid, None)
