@@ -145,6 +145,15 @@ async def cleanup_games_for(ws: ServerConnection) -> None:
                 codes.pop(code, None)
 
 
+def hangman_state_for(game: Hangman, pws) -> tuple[str, int]:
+    """En modo 'classic' el progreso es unico (del adivinador) y se ve
+    igual para los dos; en modo 'both' cada uno ve su propio progreso."""
+    if game.mode == "classic":
+        guesser_ws = next(iter(game.progress))
+        return game.revealed_for(guesser_ws), game.misses_for(guesser_ws)
+    return game.revealed_for(pws), game.misses_for(pws)
+
+
 async def broadcast_board(game: TicTacToe) -> None:
     result = check_winner(game.board)
     for ws in game.players:
@@ -163,14 +172,14 @@ async def handle_game_command(ws: ServerConnection, name: str, msg: str) -> bool
     parts = msg.split()
     cmd = parts[0]
 
-    if cmd == "/play" and len(parts) == 3:
+    if cmd == "/play" and len(parts) == 4:
         if is_in_active_game(ws):
             await send(ws, "!error ya estas jugando una partida")
             return True
         if not invite_rate_ok(ws):
             await send(ws, "!error estas invitando muy rapido, espera un poco")
             return True
-        target_name, kind = parts[1], parts[2]
+        target_name, kind, config = parts[1], parts[2], parts[3]
         game_cls = GAME_CLASSES.get(kind)
         if game_cls is None:
             await send(ws, "!error juego invalido")
@@ -180,22 +189,22 @@ async def handle_game_command(ws: ServerConnection, name: str, msg: str) -> bool
             await send(ws, "!error jugador no encontrado")
             return True
         gid = new_game_id()
-        games[gid] = game_cls(gid, ws, name)
-        await send(target_ws, f"!invite {gid} {name} {kind}")
+        games[gid] = game_cls(gid, ws, name, config)
+        await send(target_ws, f"!invite {gid} {name} {kind} {config}")
         await send(ws, f"!invited {gid} {target_name}")
         return True
 
-    if cmd == "/code" and len(parts) == 2:
+    if cmd == "/code" and len(parts) == 3:
         if is_in_active_game(ws):
             await send(ws, "!error ya estas jugando una partida")
             return True
-        kind = parts[1]
+        kind, config = parts[1], parts[2]
         game_cls = GAME_CLASSES.get(kind)
         if game_cls is None:
             await send(ws, "!error juego invalido")
             return True
         gid = new_game_id()
-        games[gid] = game_cls(gid, ws, name)
+        games[gid] = game_cls(gid, ws, name, config)
         code = new_code()
         codes[code] = gid
         await send(ws, f"!code {gid} {code}")
@@ -215,8 +224,8 @@ async def handle_game_command(ws: ServerConnection, name: str, msg: str) -> bool
         game.add_guest(ws, name)
         for pws in game.players:
             opp = game.name_for(game.opponent_of(pws))
-            await send(pws, f"!start {gid} {opp} {game.symbol_for(pws)} {game.kind}")
-        if game.kind != "battleship":
+            await send(pws, f"!start {gid} {opp} {game.symbol_for(pws)} {game.kind} {game.config}")
+        if game.whose_turn_ws() is not None:
             schedule_watchdog(gid)
         return True
 
@@ -232,8 +241,8 @@ async def handle_game_command(ws: ServerConnection, name: str, msg: str) -> bool
         game.add_guest(ws, name)
         for pws in game.players:
             opp = game.name_for(game.opponent_of(pws))
-            await send(pws, f"!start {gid} {opp} {game.symbol_for(pws)} {game.kind}")
-        if game.kind != "battleship":
+            await send(pws, f"!start {gid} {opp} {game.symbol_for(pws)} {game.kind} {game.config}")
+        if game.whose_turn_ws() is not None:
             schedule_watchdog(gid)
         return True
 
@@ -275,8 +284,10 @@ async def handle_game_command(ws: ServerConnection, name: str, msg: str) -> bool
             await send(ws, f"!error {error}")
             return True
         for pws in game.players:
-            await send(pws, f"!hm_state {gid} {game.revealed()} {game.misses}")
-        schedule_watchdog(gid)
+            revealed, misses = hangman_state_for(game, pws)
+            await send(pws, f"!hm_state {gid} {revealed} {misses}")
+        if game.whose_turn_ws() is not None:
+            schedule_watchdog(gid)
         return True
 
     if cmd == "/guess" and len(parts) == 3:
@@ -293,13 +304,15 @@ async def handle_game_command(ws: ServerConnection, name: str, msg: str) -> bool
         if result is not None:
             cancel_watchdog(gid)
             for pws in game.players:
-                await send(pws, f"!hm_state {gid} {game.word} {game.misses}")
+                await send(pws, f"!hm_state {gid} {game.word} {game.misses_for(pws)}")
                 await send(pws, f"!over {gid} {result} normal")
             games.pop(gid, None)
         else:
             for pws in game.players:
-                await send(pws, f"!hm_state {gid} {game.revealed()} {game.misses}")
-            schedule_watchdog(gid)
+                revealed, misses = hangman_state_for(game, pws)
+                await send(pws, f"!hm_state {gid} {revealed} {misses}")
+            if game.whose_turn_ws() is not None:
+                schedule_watchdog(gid)
         return True
 
     if cmd == "/place" and len(parts) == 6:

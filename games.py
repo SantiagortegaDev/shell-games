@@ -1,4 +1,5 @@
-"""Logica de 3 en raya, sin nada de red (el server la orquesta)."""
+"""Logica de los juegos, sin nada de red (el server la orquesta)."""
+import random
 
 WIN_LINES = [
     (0, 1, 2), (3, 4, 5), (6, 7, 8),
@@ -20,8 +21,9 @@ def check_winner(board: list[str]) -> str | None:
 class TicTacToe:
     kind = "ttt"
 
-    def __init__(self, game_id: str, host_ws, host_name: str) -> None:
+    def __init__(self, game_id: str, host_ws, host_name: str, config: str = "-") -> None:
         self.id = game_id
+        self.config = "-"
         self.players: dict = {host_ws: ("X", host_name)}
         self.board: list[str] = [""] * 9
         self.turn = "X"
@@ -69,24 +71,42 @@ class TicTacToe:
 
 
 HANGMAN_MAX_MISSES = 6
+HANGMAN_MODES = ("classic", "both")
+HANGMAN_WORDS = [
+    "gato", "perro", "casa", "arbol", "monte", "cielo", "playa", "fuego",
+    "nube", "rio", "sol", "luna", "estrella", "puente", "camino", "libro",
+    "tren", "avion", "barco", "flor", "montaña", "bosque", "piedra", "agua",
+    "viento", "invierno", "verano", "musica", "pintura", "escuela",
+]
 
 
 class Hangman:
-    """Uno pone la palabra (setter), el otro adivina letras (guesser)."""
+    """Modo 'classic': uno pone la palabra, el otro adivina.
+    Modo 'both': el servidor elige una palabra al azar y los dos adivinan
+    por separado; gana quien la complete con menos fallos."""
 
     kind = "hangman"
 
-    def __init__(self, game_id: str, host_ws, host_name: str) -> None:
+    def __init__(self, game_id: str, host_ws, host_name: str, config: str = "classic") -> None:
         self.id = game_id
-        self.players: dict = {host_ws: ("setter", host_name)}
-        self.word = ""
-        self.word_set = False
-        self.guessed: set[str] = set()
-        self.misses = 0
+        self.mode = config if config in HANGMAN_MODES else "classic"
+        self.config = self.mode
         self.started = False
+        self.progress: dict = {}  # ws -> {"guessed": set(), "misses": int}
+        if self.mode == "both":
+            self.word = random.choice(HANGMAN_WORDS)
+            self.word_set = True
+            self.players: dict = {host_ws: ("P1", host_name)}
+            self.progress[host_ws] = {"guessed": set(), "misses": 0}
+        else:
+            self.word = ""
+            self.word_set = False
+            self.players = {host_ws: ("setter", host_name)}
 
     def add_guest(self, guest_ws, guest_name: str) -> None:
-        self.players[guest_ws] = ("guesser", guest_name)
+        role = "P2" if self.mode == "both" else "guesser"
+        self.players[guest_ws] = (role, guest_name)
+        self.progress[guest_ws] = {"guessed": set(), "misses": 0}
         self.started = True
 
     def symbol_for(self, ws) -> str:
@@ -102,6 +122,8 @@ class Hangman:
         return None
 
     def whose_turn_ws(self):
+        if self.mode == "both":
+            return None  # los dos adivinan a su propio ritmo, no hay turnos
         role = "setter" if not self.word_set else "guesser"
         for ws, (r, _) in self.players.items():
             if r == role:
@@ -109,7 +131,7 @@ class Hangman:
         return None
 
     def set_word(self, ws, word: str) -> str:
-        if self.symbol_for(ws) != "setter":
+        if self.mode != "classic" or self.symbol_for(ws) != "setter":
             return "no sos quien pone la palabra"
         if self.word_set:
             return "la palabra ya esta puesta"
@@ -120,37 +142,70 @@ class Hangman:
         self.word_set = True
         return ""
 
+    def is_done_for(self, ws) -> bool:
+        p = self.progress[ws]
+        return all(c in p["guessed"] for c in self.word) or p["misses"] >= HANGMAN_MAX_MISSES
+
     def guess(self, ws, letter: str) -> str:
         if not self.word_set:
             return "el rival todavia no eligio la palabra"
-        if self.symbol_for(ws) != "guesser":
+        if ws not in self.progress:
             return "no sos quien adivina"
+        if self.is_done_for(ws):
+            return "ya terminaste con esta palabra"
         letter = letter.strip().lower()
         if len(letter) != 1 or not letter.isalpha():
             return "letra invalida"
-        if letter in self.guessed:
+        p = self.progress[ws]
+        if letter in p["guessed"]:
             return "ya intentaste esa letra"
-        self.guessed.add(letter)
+        p["guessed"].add(letter)
         if letter not in self.word:
-            self.misses += 1
+            p["misses"] += 1
         return ""
 
-    def revealed(self) -> str:
-        return "".join(c if c in self.guessed else "_" for c in self.word)
+    def revealed_for(self, ws) -> str:
+        guessed = self.progress[ws]["guessed"] if ws in self.progress else set()
+        return "".join(c if c in guessed else "_" for c in self.word)
+
+    def misses_for(self, ws) -> int:
+        return self.progress[ws]["misses"] if ws in self.progress else 0
 
     def result(self) -> str | None:
-        """Devuelve 'guesser', 'setter' o None si la partida sigue."""
+        """Devuelve el rol/simbolo ganador, 'draw', o None si la partida sigue."""
         if not self.word_set:
             return None
-        if all(c in self.guessed for c in self.word):
-            return "guesser"
-        if self.misses >= HANGMAN_MAX_MISSES:
-            return "setter"
-        return None
+        if self.mode == "classic":
+            ws = next(iter(self.progress))
+            p = self.progress[ws]
+            if all(c in p["guessed"] for c in self.word):
+                return "guesser"
+            if p["misses"] >= HANGMAN_MAX_MISSES:
+                return "setter"
+            return None
+        # modo "both": termina cuando ambos terminaron su intento
+        if not all(self.is_done_for(w) for w in self.progress):
+            return None
+        solved = {w: all(c in self.progress[w]["guessed"] for c in self.word) for w in self.progress}
+        if all(solved.values()):
+            best = min(self.progress, key=lambda w: self.progress[w]["misses"])
+            other = self.opponent_of(best)
+            if self.progress[best]["misses"] == self.progress[other]["misses"]:
+                return "draw"
+            return self.symbol_for(best)
+        if any(solved.values()):
+            winner = next(w for w, ok in solved.items() if ok)
+            return self.symbol_for(winner)
+        return "draw"
 
 
-SHIP_SIZES = [4, 3, 2]
+SHIP_SIZES = [4, 3, 2]  # preset "classic", tambien el default para el cliente
 BOARD_SIZE = 8
+BATTLESHIP_PRESETS = {
+    "classic": [4, 3, 2],
+    "fast": [3, 2],
+    "big": [5, 4, 3, 2],
+}
 
 
 class Battleship:
@@ -158,8 +213,11 @@ class Battleship:
 
     kind = "battleship"
 
-    def __init__(self, game_id: str, host_ws, host_name: str) -> None:
+    def __init__(self, game_id: str, host_ws, host_name: str, config: str = "classic") -> None:
         self.id = game_id
+        self.preset = config if config in BATTLESHIP_PRESETS else "classic"
+        self.config = self.preset
+        self.ship_sizes = BATTLESHIP_PRESETS[self.preset]
         self.players: dict = {host_ws: ("P1", host_name)}
         self.started = False
         self.battle = False
@@ -190,7 +248,7 @@ class Battleship:
         return self.turn if self.battle else None
 
     def is_placement_done(self, ws) -> bool:
-        return len(self.placed_ships.get(ws, {})) == len(SHIP_SIZES)
+        return len(self.placed_ships.get(ws, {})) == len(self.ship_sizes)
 
     def both_ready(self) -> bool:
         return all(self.is_placement_done(w) for w in self.players)
@@ -201,11 +259,11 @@ class Battleship:
         placed = self.placed_ships[ws]
         if ship_index in placed:
             return "ese barco ya esta colocado"
-        if not (0 <= ship_index < len(SHIP_SIZES)):
+        if not (0 <= ship_index < len(self.ship_sizes)):
             return "barco invalido"
         if orientation not in ("h", "v"):
             return "orientacion invalida"
-        size = SHIP_SIZES[ship_index]
+        size = self.ship_sizes[ship_index]
         occupied = {c for cells in placed.values() for c in cells}
         cells = []
         for i in range(size):
@@ -247,7 +305,7 @@ class Battleship:
         if hit:
             for ship_index, cells in placed.items():
                 if idx in cells and set(cells).issubset(self.shots_at[opponent]):
-                    sunk_size = SHIP_SIZES[ship_index]
+                    sunk_size = self.ship_sizes[ship_index]
                     break
         else:
             self.turn = opponent
