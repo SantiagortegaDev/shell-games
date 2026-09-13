@@ -319,11 +319,11 @@ async def handle_game_command(ws: ServerConnection, name: str, msg: str) -> bool
             await send(ws, f"!error {error}")
             return True
         for pws in game.players:
-            await send(pws, f"!bs_state {gid} {game.own_board_str(pws)} {game.tracking_board_str(pws)} placing -")
+            await send(pws, f"!bs_state {gid} {game.own_board_str(pws)} {game.tracking_board_str(pws)} placing - - -")
         if game.both_ready():
             game.start_battle()
             for pws in game.players:
-                await send(pws, f"!bs_state {gid} {game.own_board_str(pws)} {game.tracking_board_str(pws)} battle {game.symbol_for(game.turn)}")
+                await send(pws, f"!bs_state {gid} {game.own_board_str(pws)} {game.tracking_board_str(pws)} battle {game.symbol_for(game.turn)} - -")
             schedule_watchdog(gid)
         return True
 
@@ -338,20 +338,22 @@ async def handle_game_command(ws: ServerConnection, name: str, msg: str) -> bool
         except ValueError:
             await send(ws, "!error coordenada invalida")
             return True
-        error, _result = game.shoot(ws, row, col)
+        error, _result, sunk_size = game.shoot(ws, row, col)
         if error:
             await send(ws, f"!error {error}")
             return True
+        shooter_symbol = game.symbol_for(ws)
+        sunk_token = str(sunk_size) if sunk_size is not None else "-"
         winner = game.check_winner()
         if winner is not None:
             cancel_watchdog(gid)
             for pws in game.players:
-                await send(pws, f"!bs_state {gid} {game.own_board_str(pws)} {game.tracking_board_str(pws)} battle -")
+                await send(pws, f"!bs_state {gid} {game.own_board_str(pws)} {game.tracking_board_str(pws)} battle - {shooter_symbol} {sunk_token}")
                 await send(pws, f"!over {gid} {winner} normal")
             games.pop(gid, None)
         else:
             for pws in game.players:
-                await send(pws, f"!bs_state {gid} {game.own_board_str(pws)} {game.tracking_board_str(pws)} battle {game.symbol_for(game.turn)}")
+                await send(pws, f"!bs_state {gid} {game.own_board_str(pws)} {game.tracking_board_str(pws)} battle {game.symbol_for(game.turn)} {shooter_symbol} {sunk_token}")
             schedule_watchdog(gid)
         return True
 

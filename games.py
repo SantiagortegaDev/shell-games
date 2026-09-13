@@ -224,22 +224,34 @@ class Battleship:
         self.battle = True
         self.turn = next(iter(self.players))
 
-    def shoot(self, ws, row: int, col: int) -> tuple[str, str]:
-        """Devuelve (error, resultado). resultado: 'hit' o 'miss' si no hubo error."""
+    def shoot(self, ws, row: int, col: int) -> tuple[str, str, int | None]:
+        """Devuelve (error, resultado, tamano_hundido). resultado: 'hit' o
+        'miss' si no hubo error. Acertar da otro turno; solo fallar pasa el
+        turno al rival. tamano_hundido es el tamano del barco recien
+        hundido con este disparo, o None si no se hundio ninguno."""
         if not self.battle:
-            return "todavia se estan colocando los barcos", ""
+            return "todavia se estan colocando los barcos", "", None
         if ws != self.turn:
-            return "no es tu turno", ""
+            return "no es tu turno", "", None
         if not (0 <= row < BOARD_SIZE and 0 <= col < BOARD_SIZE):
-            return "coordenada invalida", ""
+            return "coordenada invalida", "", None
         idx = row * BOARD_SIZE + col
         opponent = self.opponent_of(ws)
         if idx in self.shots_at[opponent]:
-            return "ya disparaste ahi", ""
+            return "ya disparaste ahi", "", None
         self.shots_at[opponent].add(idx)
-        ship_cells = {c for cells in self.placed_ships[opponent].values() for c in cells}
-        self.turn = opponent
-        return "", ("hit" if idx in ship_cells else "miss")
+        placed = self.placed_ships[opponent]
+        ship_cells = {c for cells in placed.values() for c in cells}
+        hit = idx in ship_cells
+        sunk_size = None
+        if hit:
+            for ship_index, cells in placed.items():
+                if idx in cells and set(cells).issubset(self.shots_at[opponent]):
+                    sunk_size = SHIP_SIZES[ship_index]
+                    break
+        else:
+            self.turn = opponent
+        return "", ("hit" if hit else "miss"), sunk_size
 
     def check_winner(self):
         """Devuelve el simbolo ganador o None si sigue."""

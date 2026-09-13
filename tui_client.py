@@ -865,13 +865,14 @@ class BSBoard(Static, can_focus=True):
             self.col = col
             super().__init__()
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(self, compact: bool = False, **kwargs) -> None:
         super().__init__(**kwargs)
         self.cells = ["."] * (BOARD_SIZE * BOARD_SIZE)
         self.interactive = False
         self.show_own = True  # True: tablero propio (con barcos); False: seguimiento del rival
         self.ghost_len = 0  # largo del barco a previsualizar (fase de colocacion)
         self.orientation = "h"
+        self.compact = compact  # tablero mini (mi flota): sin espacios entre celdas
 
     def on_mount(self) -> None:
         self._render_board()
@@ -934,7 +935,8 @@ class BSBoard(Static, can_focus=True):
                 idx = row * BOARD_SIZE + col
                 c = self.cells[idx]
                 if c == "X":
-                    ch = "[bold red]X[/bold red]"
+                    hit_color = "red" if self.show_own else "green"
+                    ch = f"[bold {hit_color}]X[/bold {hit_color}]"
                 elif c == "o":
                     ch = "[dim]o[/dim]"
                 elif c == "S" and self.show_own:
@@ -946,7 +948,7 @@ class BSBoard(Static, can_focus=True):
                 elif self.interactive and idx in ghost:
                     ch = "[black on #90ee90]~[/black on #90ee90]"
                 cells_text.append(ch)
-            lines.append(" ".join(cells_text))
+            lines.append(("" if self.compact else " ").join(cells_text))
         self.update("\n".join(lines))
 
     def action_cursor_left(self) -> None:
@@ -973,6 +975,24 @@ class BSBoard(Static, can_focus=True):
         self.post_message(self.CellSelected(row, col))
 
 
+class ControlsHelpScreen(ModalScreen):
+    """Recordatorio de controles, mostrado una vez al entrar a la partida."""
+
+    BINDINGS = [Binding("enter", "dismiss_help", "Cerrar", priority=True)]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="invite-box"):
+            yield Static("[bold]Controles[/bold]", id="invite-title")
+            yield Static("[dim]Flechas: mover[/dim]", id="ch-1")
+            yield Static("[dim]R: rotar el barco[/dim]", id="ch-2")
+            yield Static("[dim]Enter: colocar / disparar[/dim]", id="ch-3")
+            yield Static("[dim]Q: abandonar[/dim]", id="ch-4")
+            yield Static("[dim]Enter para continuar[/dim]", id="invite-hint2")
+
+    def action_dismiss_help(self) -> None:
+        self.dismiss()
+
+
 class BattleshipScreen(FinishableScreen):
     BINDINGS = [Binding("q", "confirm_abandon", "Abandonar")]
 
@@ -984,6 +1004,7 @@ class BattleshipScreen(FinishableScreen):
         self.finished = False
         self.phase = "placing"
         self.next_ship = 0
+        self.remaining_sizes = list(SHIP_SIZES)
         self._error_task: asyncio.Task | None = None
 
     def compose(self) -> ComposeResult:
@@ -991,18 +1012,25 @@ class BattleshipScreen(FinishableScreen):
             yield Static("BATALLA NAVAL", id="game-title")
             yield Static(f"vs {self.opponent}", id="game-opponent")
             yield Static("", id="game-status")
+            yield Static("", id="fleet-label")
+            yield BSBoard(compact=True, id="own-board")
+            yield Static("", id="remaining-label")
             yield BSBoard(id="board")
             yield Static("[dim]Volver \\[q][/dim]", id="quit-hint")
             yield Menu([("back", "Volver")], show_hint=False, id="menu")
 
     def on_mount(self) -> None:
         self.query_one(Menu).display = False
-        board = self.query_one(BSBoard)
+        self.query_one("#fleet-label", Static).display = False
+        self.query_one("#own-board", BSBoard).display = False
+        self.query_one("#remaining-label", Static).display = False
+        board = self.query_one("#board", BSBoard)
         board.interactive = True
         board.set_ghost_len(SHIP_SIZES[0])
         board.focus()
         self._update_status()
         self._error_task = asyncio.create_task(self._watch_errors())
+        self.app.push_screen(ControlsHelpScreen(), callback=lambda _: board.focus())
 
     async def _watch_errors(self) -> None:
         app: "ShellGamesApp" = self.app  # type: ignore[assignment]
@@ -1028,7 +1056,7 @@ class BattleshipScreen(FinishableScreen):
 
     def on_bsboard_cell_selected(self, event: BSBoard.CellSelected) -> None:
         app: "ShellGamesApp" = self.app  # type: ignore[assignment]
-        board = self.query_one(BSBoard)
+        board = self.query_one("#board", BSBoard)
         if self.phase == "placing":
             if self.next_ship >= len(SHIP_SIZES):
                 return
@@ -1053,8 +1081,24 @@ class BattleshipScreen(FinishableScreen):
                 break
         return count
 
-    def apply_state(self, own: str, tracking: str, phase: str, turn_symbol: str) -> None:
-        board = self.query_one(BSBoard)
+    def _update_remaining_label(self) -> None:
+        label = self.query_one("#remaining-label", Static)
+        if self.remaining_sizes:
+            sizes = ", ".join(str(s) for s in self.remaining_sizes)
+            label.update(f"[dim]Barcos rivales por hundir: {sizes}[/dim]")
+        else:
+            label.update("[green]Encontraste toda la flota rival[/green]")
+
+    def apply_state(
+        self,
+        own: str,
+        tracking: str,
+        phase: str,
+        turn_symbol: str,
+        shooter_symbol: str = "-",
+        sunk_size: int | None = None,
+    ) -> None:
+        board = self.query_one("#board", BSBoard)
         if phase == "placing":
             self.next_ship = self._ships_completed(own)
             board.set_ghost_len(SHIP_SIZES[self.next_ship] if self.next_ship < len(SHIP_SIZES) else 0)
@@ -1066,6 +1110,17 @@ class BattleshipScreen(FinishableScreen):
             self.phase = "battle"
             board.show_own = False
             board.set_ghost_len(0)
+            self.query_one("#fleet-label", Static).display = True
+            self.query_one("#fleet-label", Static).update("[dim]Tu flota:[/dim]")
+            self.query_one("#own-board", BSBoard).display = True
+            self.query_one("#remaining-label", Static).display = True
+            self._update_remaining_label()
+        own_board = self.query_one("#own-board", BSBoard)
+        own_board.show_own = True
+        own_board.set_cells(own, interactive=False)
+        if sunk_size is not None and shooter_symbol == self.symbol and sunk_size in self.remaining_sizes:
+            self.remaining_sizes.remove(sunk_size)
+            self._update_remaining_label()
         my_turn = turn_symbol == self.symbol
         board.set_cells(tracking, interactive=my_turn and not self.finished)
         status = self.query_one("#game-status", Static)
@@ -1075,7 +1130,7 @@ class BattleshipScreen(FinishableScreen):
     def _finish(self) -> None:
         if self._error_task:
             self._error_task.cancel()
-        self.query_one(BSBoard).interactive = False
+        self.query_one("#board", BSBoard).interactive = False
         self._finish_common()
 
     def apply_over(self, result: str, reason: str = "normal") -> None:
@@ -1130,12 +1185,19 @@ class ShellGamesApp(App):
     #hm-word { width: 100%; text-align: center; color: white; margin: 1 0; }
     #hm-misses { width: 100%; text-align: center; color: yellow; margin-bottom: 1; }
     BSBoard { width: 100%; height: auto; background: transparent; margin-bottom: 1; content-align: center middle; }
+    #fleet-label { width: 100%; text-align: center; }
+    #own-board { margin-bottom: 1; }
+    #remaining-label { width: 100%; text-align: center; margin-bottom: 1; }
     Input { background: transparent; border: round green; width: 44; }
     Input:focus { border: round green; }
     InvitePopup { align: center middle; background: black 60%; }
+    ControlsHelpScreen { align: center middle; background: black 60%; }
     #invite-box { width: auto; height: auto; border: round green; padding: 1 4; background: #14161f; }
     #invite-title { width: auto; margin-bottom: 1; }
     #invite-hint { width: auto; }
+    #ch-1, #ch-2, #ch-3, #ch-4 { width: auto; }
+    #ch-4 { margin-bottom: 1; }
+    #invite-hint2 { width: auto; }
     """
 
     def __init__(self, url: str = DEFAULT_URL) -> None:
@@ -1231,9 +1293,10 @@ class ShellGamesApp(App):
             if isinstance(self.screen, HangmanScreen) and self.screen.gid == gid:
                 self.screen.apply_state(revealed, int(misses))
         elif msg.startswith("!bs_state "):
-            _, gid, own, tracking, phase, turn_symbol = msg.split()
+            _, gid, own, tracking, phase, turn_symbol, shooter_symbol, sunk = msg.split()
             if isinstance(self.screen, BattleshipScreen) and self.screen.gid == gid:
-                self.screen.apply_state(own, tracking, phase, turn_symbol)
+                sunk_size = int(sunk) if sunk != "-" else None
+                self.screen.apply_state(own, tracking, phase, turn_symbol, shooter_symbol, sunk_size)
         elif msg.startswith("!over "):
             parts = msg.split()
             gid, result = parts[1], parts[2]
