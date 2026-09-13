@@ -53,10 +53,19 @@ class Menu(Static, can_focus=True):
             self.value = value
             super().__init__()
 
-    def __init__(self, options: list[tuple[str, str]], show_hint: bool = True, **kwargs) -> None:
+    def __init__(
+        self,
+        options: list[tuple[str, str]],
+        show_hint: bool = True,
+        breaks: set[int] = frozenset(),
+        headers: dict[int, str] | None = None,
+        **kwargs,
+    ) -> None:
         super().__init__(**kwargs)
         self.options = options
         self.show_hint = show_hint
+        self.breaks = breaks
+        self.headers = headers or {}
 
     def on_mount(self) -> None:
         self._render_menu()
@@ -67,10 +76,16 @@ class Menu(Static, can_focus=True):
     def _render_menu(self) -> None:
         lines = []
         for i, (_, label) in enumerate(self.options):
+            if i in self.headers:
+                if lines:
+                    lines.append("")
+                lines.append(f"[dim]{self.headers[i]}[/dim]")
             if i == self.index:
                 lines.append(f"[green]{self.SELECTED_ICON} {label}[/green]")
             else:
                 lines.append(f"[white]{self.UNSELECTED_ICON} {label}[/white]")
+            if i in self.breaks:
+                lines.append("")
         if self.show_hint:
             lines.append("")
             lines.append("[dim]\\[↑↓] mover   \\[Enter] seleccionar[/dim]")
@@ -89,8 +104,7 @@ class Menu(Static, can_focus=True):
 class Board(Static, can_focus=True):
     """Tablero 3x3 con separadores reales. Flechas+Enter o teclas 0-8 juegan."""
 
-    MY_COLOR = "bright_green"
-    OPPONENT_COLOR = "bright_cyan"
+    SYMBOL_COLORS = {"X": "red", "O": "blue"}
     CURSOR_STYLE = "black on #90ee90"
     CURSOR_STYLE_WAIT = "white on grey23"
     WIN_COLOR = "black on green"
@@ -154,7 +168,7 @@ class Board(Static, can_focus=True):
                 style = self.CURSOR_STYLE if self.interactive else self.CURSOR_STYLE_WAIT
                 content = f"[{style}] {shown} [/{style}]"
             elif c in ("X", "O"):
-                color = self.MY_COLOR if c == self.my_symbol else self.OPPONENT_COLOR
+                color = self.SYMBOL_COLORS.get(c, "white")
                 content = f" [bold {color}]{c}[/bold {color}] "
             else:
                 content = f" [dim]{i}[/dim] "
@@ -222,7 +236,16 @@ class MainScreen(Screen):
         with Vertical(id="main-box"):
             yield Static(BANNER, id="banner")
             yield Static("", id="conn-status")
-            yield Menu([("play", "Jugar"), ("about", "About"), ("quit", "Quit")], id="menu")
+            yield Menu(
+                [
+                    ("play", "Jugar"),
+                    ("about", "About"),
+                    ("rename", "Cambiar nombre"),
+                    ("quit", "Quit"),
+                ],
+                breaks={0},
+                id="menu",
+            )
 
     def on_mount(self) -> None:
         self.query_one(Menu).display = False
@@ -246,9 +269,43 @@ class MainScreen(Screen):
         if event.value == "about":
             self.app.push_screen(AboutScreen())
         elif event.value == "play":
-            self.app.push_screen(GameSelectScreen())
+            self.app.push_screen(PlayScreen())
+        elif event.value == "rename":
+            self.app.push_screen(RenameScreen())
         elif event.value == "quit":
             self.app.action_quit_clean()  # type: ignore[attr-defined]
+
+
+class RenameScreen(Screen):
+    BINDINGS = [Binding("escape", "back", "Volver")]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="main-box"):
+            yield Static(BANNER, id="banner")
+            yield Static("Nuevo nombre:", id="name-label")
+            yield Input(placeholder="jugador", id="rename-input")
+            yield Static("", id="invite-status")
+
+    def on_mount(self) -> None:
+        app: "ShellGamesApp" = self.app  # type: ignore[assignment]
+        input_widget = self.query_one(Input)
+        input_widget.value = app.username or ""
+        input_widget.focus()
+
+    def action_back(self) -> None:
+        self.app.pop_screen()
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        name = re.sub(r"\s+", "_", event.value.strip())[:20]
+        status = self.query_one("#invite-status", Static)
+        if not name:
+            status.update("[red]Escribe un nombre[/red]")
+            return
+        app: "ShellGamesApp" = self.app  # type: ignore[assignment]
+        await app.send_line(f"/rename {name}")
+        new_name = await app.rename_queue.get()
+        app.username = new_name
+        self.app.pop_screen()
 
 
 class AboutScreen(Screen):
@@ -281,19 +338,22 @@ class AboutScreen(Screen):
 # ---------------------------------------------------------------------------
 
 
-class GameSelectScreen(Screen):
-    """Elegir el juego."""
+class PlayScreen(Screen):
+    """Unirme con codigo de una, o elegir que juego crear."""
 
     def compose(self) -> ComposeResult:
         with Vertical(id="main-box"):
             yield Static(BANNER, id="banner")
             yield Menu(
                 [
+                    ("code_join", "Unirme con codigo"),
                     ("ttt", "3 en raya"),
                     ("hangman", "Ahorcado"),
                     ("battleship", "Batalla naval"),
                     ("back", "Volver"),
                 ],
+                breaks={0, 3},
+                headers={1: "Crear una partida"},
                 id="menu",
             )
 
@@ -303,11 +363,13 @@ class GameSelectScreen(Screen):
     def on_menu_selected(self, event: Menu.Selected) -> None:
         if event.value == "back":
             self.app.pop_screen()
+        elif event.value == "code_join":
+            self.app.push_screen(CodeJoinScreen())
         else:
-            self.app.push_screen(PlayMethodScreen(event.value))
+            self.app.push_screen(CreateMethodScreen(event.value))
 
 
-class PlayMethodScreen(Screen):
+class CreateMethodScreen(Screen):
     def __init__(self, kind: str) -> None:
         super().__init__()
         self.kind = kind
@@ -319,7 +381,6 @@ class PlayMethodScreen(Screen):
                 [
                     ("byname", "Invitar por nombre"),
                     ("code_host", "Crear codigo"),
-                    ("code_join", "Unirme con codigo"),
                     ("back", "Volver"),
                 ],
                 id="menu",
@@ -333,8 +394,6 @@ class PlayMethodScreen(Screen):
             self.app.push_screen(NameInviteScreen(self.kind))
         elif event.value == "code_host":
             self.app.push_screen(CodeHostScreen(self.kind))
-        elif event.value == "code_join":
-            self.app.push_screen(CodeJoinScreen())
         elif event.value == "back":
             self.app.pop_screen()
 
@@ -528,7 +587,32 @@ class AbandonConfirmScreen(ModalScreen):
             app.run_worker(app.send_line(f"/forfeit {gid}"))
 
 
-class GameScreen(Screen):
+class FinishableScreen(Screen):
+    """Comun a las 3 pantallas de juego: mientras se juega solo se ve
+    "Volver [q]" (abandonar con confirmacion); al terminar se oculta eso y
+    aparece el Menu "Volver" con flechita. Si nadie vuelve al menu en un
+    minuto, vuelve solo."""
+
+    AUTO_RETURN_SECONDS = 60
+
+    def _finish_common(self) -> None:
+        self.finished = True
+        self.query_one("#quit-hint", Static).display = False
+        menu = self.query_one(Menu)
+        menu.display = True
+        menu.focus()
+        self.set_timer(self.AUTO_RETURN_SECONDS, self._auto_return)
+
+    def _auto_return(self) -> None:
+        if self.app.screen is self:
+            self.app.pop_to_main()  # type: ignore[attr-defined]
+
+    def on_menu_selected(self, event: Menu.Selected) -> None:
+        if event.value == "back":
+            self.app.pop_to_main()  # type: ignore[attr-defined]
+
+
+class GameScreen(FinishableScreen):
     BINDINGS = [Binding("q", "confirm_abandon", "Abandonar")]
 
     def __init__(self, gid: str, opponent: str, symbol: str) -> None:
@@ -549,6 +633,7 @@ class GameScreen(Screen):
             yield Menu([("back", "Volver")], show_hint=False, id="menu")
 
     def on_mount(self) -> None:
+        self.query_one(Menu).display = False
         self.apply_board("." * 9, "X")
         self.query_one(Board).focus()
 
@@ -578,8 +663,7 @@ class GameScreen(Screen):
         return None
 
     def _finish(self) -> None:
-        self.finished = True
-        self.query_one(Menu).focus()
+        self._finish_common()
 
     def apply_over(self, result: str, reason: str = "normal") -> None:
         board = self.query_one(Board)
@@ -615,17 +699,13 @@ class GameScreen(Screen):
         app: "ShellGamesApp" = self.app  # type: ignore[assignment]
         self.run_worker(app.send_line(f"/move {self.gid} {event.cell}"))
 
-    def on_menu_selected(self, event: Menu.Selected) -> None:
-        if event.value == "back":
-            self.app.pop_screen()
-
 
 # ---------------------------------------------------------------------------
 # Pantallas: ahorcado
 # ---------------------------------------------------------------------------
 
 
-class HangmanScreen(Screen):
+class HangmanScreen(FinishableScreen):
     BINDINGS = [Binding("q", "confirm_abandon", "Abandonar")]
 
     def __init__(self, gid: str, opponent: str, role: str) -> None:
@@ -649,6 +729,7 @@ class HangmanScreen(Screen):
             yield Menu([("back", "Volver")], show_hint=False, id="menu")
 
     def on_mount(self) -> None:
+        self.query_one(Menu).display = False
         input_widget = self.query_one("#hm-input", Input)
         if self.role == "setter":
             input_widget.placeholder = "escribe la palabra secreta"
@@ -706,11 +787,10 @@ class HangmanScreen(Screen):
             input_widget.focus()
 
     def _finish(self) -> None:
-        self.finished = True
         if self._error_task:
             self._error_task.cancel()
         self.query_one("#hm-input", Input).disabled = True
-        self.query_one(Menu).focus()
+        self._finish_common()
 
     def apply_over(self, result: str, reason: str = "normal") -> None:
         self._finish()
@@ -734,10 +814,6 @@ class HangmanScreen(Screen):
     def apply_opponent_left(self) -> None:
         self._finish()
         self.query_one("#game-status", Static).update(f"[red]{self.opponent} se desconecto[/red]")
-
-    def on_menu_selected(self, event: Menu.Selected) -> None:
-        if event.value == "back":
-            self.app.pop_screen()
 
 
 # ---------------------------------------------------------------------------
@@ -788,7 +864,32 @@ class BSBoard(Static, can_focus=True):
 
     def action_rotate(self) -> None:
         self.orientation = "v" if self.orientation == "h" else "h"
+        self._clamp_cursor()
         self._render_board()
+
+    def set_ghost_len(self, length: int) -> None:
+        self.ghost_len = length
+        self._clamp_cursor()
+        self._render_board()
+
+    def _max_row(self) -> int:
+        if self.ghost_len and self.orientation == "v":
+            return BOARD_SIZE - self.ghost_len
+        return BOARD_SIZE - 1
+
+    def _max_col(self) -> int:
+        if self.ghost_len and self.orientation == "h":
+            return BOARD_SIZE - self.ghost_len
+        return BOARD_SIZE - 1
+
+    def _clamp_cursor(self) -> None:
+        """El barco que se esta colocando nunca debe poder apuntar fuera
+        del tablero: se limita por donde puede pararse el cursor segun su
+        largo y orientacion actual."""
+        row, col = divmod(self.cursor, BOARD_SIZE)
+        row = min(row, self._max_row())
+        col = min(col, self._max_col())
+        self.cursor = row * BOARD_SIZE + col
 
     def _ghost_cells(self) -> set[int]:
         if not self.ghost_len:
@@ -817,7 +918,7 @@ class BSBoard(Static, can_focus=True):
                 elif c == "S" and self.show_own:
                     ch = "[bright_green]S[/bright_green]"
                 else:
-                    ch = "[dim]·[/dim]"
+                    ch = "[blue]·[/blue]"
                 if self.interactive and idx == self.cursor:
                     ch = f"[{self.CURSOR_STYLE}]{c if c in ('X','o') else '+'}[/{self.CURSOR_STYLE}]"
                 elif self.interactive and idx in ghost:
@@ -831,7 +932,7 @@ class BSBoard(Static, can_focus=True):
             self.cursor -= 1
 
     def action_cursor_right(self) -> None:
-        if self.interactive and self.cursor % BOARD_SIZE < BOARD_SIZE - 1:
+        if self.interactive and self.cursor % BOARD_SIZE < self._max_col():
             self.cursor += 1
 
     def action_cursor_up(self) -> None:
@@ -839,7 +940,8 @@ class BSBoard(Static, can_focus=True):
             self.cursor -= BOARD_SIZE
 
     def action_cursor_down(self) -> None:
-        if self.interactive and self.cursor < BOARD_SIZE * (BOARD_SIZE - 1):
+        row, _ = divmod(self.cursor, BOARD_SIZE)
+        if self.interactive and row < self._max_row():
             self.cursor += BOARD_SIZE
 
     def action_select(self) -> None:
@@ -849,7 +951,7 @@ class BSBoard(Static, can_focus=True):
         self.post_message(self.CellSelected(row, col))
 
 
-class BattleshipScreen(Screen):
+class BattleshipScreen(FinishableScreen):
     BINDINGS = [Binding("q", "confirm_abandon", "Abandonar")]
 
     def __init__(self, gid: str, opponent: str, symbol: str) -> None:
@@ -872,9 +974,10 @@ class BattleshipScreen(Screen):
             yield Menu([("back", "Volver")], show_hint=False, id="menu")
 
     def on_mount(self) -> None:
+        self.query_one(Menu).display = False
         board = self.query_one(BSBoard)
         board.interactive = True
-        board.ghost_len = SHIP_SIZES[0]
+        board.set_ghost_len(SHIP_SIZES[0])
         board.focus()
         self._update_status()
         self._error_task = asyncio.create_task(self._watch_errors())
@@ -932,7 +1035,7 @@ class BattleshipScreen(Screen):
         board = self.query_one(BSBoard)
         if phase == "placing":
             self.next_ship = self._ships_completed(own)
-            board.ghost_len = SHIP_SIZES[self.next_ship] if self.next_ship < len(SHIP_SIZES) else 0
+            board.set_ghost_len(SHIP_SIZES[self.next_ship] if self.next_ship < len(SHIP_SIZES) else 0)
             board.show_own = True
             board.set_cells(own, interactive=self.next_ship < len(SHIP_SIZES))
             self._update_status()
@@ -940,7 +1043,7 @@ class BattleshipScreen(Screen):
         if self.phase != "battle":
             self.phase = "battle"
             board.show_own = False
-            board.ghost_len = 0
+            board.set_ghost_len(0)
         my_turn = turn_symbol == self.symbol
         board.set_cells(tracking, interactive=my_turn and not self.finished)
         status = self.query_one("#game-status", Static)
@@ -948,11 +1051,10 @@ class BattleshipScreen(Screen):
             status.update("[green]Tu turno: elige donde disparar[/green]" if my_turn else f"[dim]Turno de {self.opponent}[/dim]")
 
     def _finish(self) -> None:
-        self.finished = True
         if self._error_task:
             self._error_task.cancel()
         self.query_one(BSBoard).interactive = False
-        self.query_one(Menu).focus()
+        self._finish_common()
 
     def apply_over(self, result: str, reason: str = "normal") -> None:
         self._finish()
@@ -976,10 +1078,6 @@ class BattleshipScreen(Screen):
     def apply_opponent_left(self) -> None:
         self._finish()
         self.query_one("#game-status", Static).update(f"[red]{self.opponent} se desconecto[/red]")
-
-    def on_menu_selected(self, event: Menu.Selected) -> None:
-        if event.value == "back":
-            self.app.pop_screen()
 
 
 # ---------------------------------------------------------------------------
@@ -1028,6 +1126,7 @@ class ShellGamesApp(App):
         self._who_queue: "asyncio.Queue[str]" = asyncio.Queue()
         self.error_queue: "asyncio.Queue[str]" = asyncio.Queue()
         self.code_queue: "asyncio.Queue[tuple[str, str]]" = asyncio.Queue()
+        self.rename_queue: "asyncio.Queue[str]" = asyncio.Queue()
 
     def on_mount(self) -> None:
         self.push_screen(NameScreen())
@@ -1035,6 +1134,12 @@ class ShellGamesApp(App):
     def begin_connection(self, username: str) -> None:
         self.switch_screen(MainScreen())
         self.run_worker(self._connect_loop(username), exclusive=True)
+
+    def pop_to_main(self) -> None:
+        """Vuelve al menu principal, sin importar cuantas pantallas haya
+        apiladas encima (invitar/codigo/juego)."""
+        while len(self.screen_stack) > 1 and not isinstance(self.screen, MainScreen):
+            self.pop_screen()
 
     async def send_line(self, text: str) -> None:
         if self.ws is not None:
@@ -1078,6 +1183,11 @@ class ShellGamesApp(App):
             self._who_queue.put_nowait(msg)
         elif msg.startswith("!invite "):
             _, gid, inviter, kind = msg.split()
+            if isinstance(self.screen, game_screens) and self.screen.finished:
+                # no dejar la partida vieja terminada debajo en la pila: si
+                # despues aceptan esta invitacion y "Volver" en la nueva
+                # partida, debe ir al menu, no a la pantalla vieja.
+                self.pop_to_main()
             self.push_screen(InvitePopup(gid, inviter, kind))
         elif msg.startswith("!start "):
             _, gid, opponent, symbol, kind = msg.split()
@@ -1112,6 +1222,8 @@ class ShellGamesApp(App):
         elif msg.startswith("!code "):
             _, gid, code = msg.split()
             self.code_queue.put_nowait((gid, code))
+        elif msg.startswith("!renamed "):
+            self.rename_queue.put_nowait(msg.split()[1])
         elif msg.startswith("!error "):
             self.error_queue.put_nowait(msg[len("!error "):])
         elif msg.startswith("!declined "):

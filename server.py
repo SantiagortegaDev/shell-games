@@ -64,6 +64,22 @@ def new_code() -> str:
     return code
 
 
+def sanitize_name(name: str) -> str:
+    """El protocolo es texto separado por espacios: un nombre con espacios
+    rompe el parseo de !start/!invite/etc. en el cliente, asi que se sanea
+    aca, en el unico lugar donde nacen los nombres (conexion y /rename)."""
+    return re.sub(r"\s+", "_", name.strip())[:20]
+
+
+def dedupe_name(name: str, exclude: ServerConnection | None = None) -> str:
+    taken = {n for w, n in players.items() if w is not exclude}
+    base, n = name, 2
+    while name in taken:
+        name = f"{base}{n}"
+        n += 1
+    return name
+
+
 def find_ws_by_name(name: str) -> ServerConnection | None:
     for ws, pname in players.items():
         if pname == name:
@@ -362,17 +378,7 @@ async def handler(ws: ServerConnection) -> None:
     except websockets.ConnectionClosed:
         return
 
-    # el protocolo es texto separado por espacios: un nombre con espacios
-    # rompe el parseo de !start/!invite/etc. en el cliente, asi que se
-    # sanea aca, en el unico lugar donde nace el nombre.
-    name = re.sub(r"\s+", "_", name)[:20]
-    if not name:
-        name = f"anon{id(ws) % 1000}"
-    base, n = name, 2
-    while name in players.values():
-        name = f"{base}{n}"
-        n += 1
-
+    name = dedupe_name(sanitize_name(name) or f"anon{id(ws) % 1000}")
     players[ws] = name
     log.info("conectado: %s (%s) - %d en linea", name, ws.remote_address, len(players))
     await ws.send(f"Conectado como {name}. Comandos: /who, /quit")
@@ -388,6 +394,16 @@ async def handler(ws: ServerConnection) -> None:
             if msg == "/who":
                 who = ", ".join(players.values())
                 await ws.send(f"* conectados ({len(players)}): {who}")
+                continue
+            if msg.startswith("/rename ") and len(msg.split()) == 2:
+                new_name = sanitize_name(msg.split()[1])
+                if new_name:
+                    new_name = dedupe_name(new_name, exclude=ws)
+                    old_name = name
+                    name = new_name
+                    players[ws] = name
+                    log.info("renombrado: %s -> %s", old_name, name)
+                await ws.send(f"!renamed {name}")
                 continue
             if msg.startswith("/") and await handle_game_command(ws, name, msg):
                 continue
