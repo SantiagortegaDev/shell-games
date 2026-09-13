@@ -5,6 +5,7 @@ import os
 import random
 import re
 import sys
+import time
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -67,8 +68,21 @@ class Menu(Static, can_focus=True):
         self.breaks = breaks
         self.headers = headers or {}
 
+    SELECT_DEBOUNCE = 0.15
+
     def on_mount(self) -> None:
         self._render_menu()
+        self._focused_at = 0.0
+
+    def focus(self, scroll_visible: bool = True) -> "Menu":
+        # teclas Enter que ya estaban "en camino" (el usuario mashea Enter
+        # justo cuando la pantalla anterior cambia, o cuando este menu
+        # recien se activa tras terminar una partida) no deben colarse
+        # aca y disparar una seleccion sin querer. Se resetea aca mismo
+        # (no en un handler on_focus) para que quede garantizado antes de
+        # que se procese cualquier tecla ya encolada.
+        self._focused_at = time.monotonic()
+        return super().focus(scroll_visible)
 
     def watch_index(self) -> None:
         self._render_menu()
@@ -98,6 +112,8 @@ class Menu(Static, can_focus=True):
         self.index = (self.index + 1) % len(self.options)
 
     def action_select(self) -> None:
+        if time.monotonic() - self._focused_at < self.SELECT_DEBOUNCE:
+            return
         self.post_message(self.Selected(self.options[self.index][0]))
 
 
@@ -1224,6 +1240,13 @@ class ShellGamesApp(App):
         apiladas encima (invitar/codigo/juego)."""
         while len(self.screen_stack) > 1 and not isinstance(self.screen, MainScreen):
             self.pop_screen()
+        if isinstance(self.screen, MainScreen):
+            # reenfocar reinicia el "enfriamiento" del menu: Enters que
+            # venian de mashear al terminar la partida anterior no deben
+            # colarse aca y disparar una navegacion sin querer.
+            menu = self.screen.query_one(Menu)
+            if menu.display:
+                menu.focus()
 
     async def send_line(self, text: str) -> None:
         if self.ws is not None:
