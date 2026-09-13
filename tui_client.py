@@ -278,6 +278,7 @@ class MainScreen(Screen):
 
 class RenameScreen(Screen):
     BINDINGS = [Binding("escape", "back", "Volver")]
+    RENAME_TIMEOUT = 8
 
     def compose(self) -> ComposeResult:
         with Vertical(id="main-box"):
@@ -291,8 +292,11 @@ class RenameScreen(Screen):
         input_widget = self.query_one(Input)
         input_widget.value = app.username or ""
         input_widget.focus()
+        self._wait_task: asyncio.Task | None = None
 
     def action_back(self) -> None:
+        if self._wait_task:
+            self._wait_task.cancel()
         self.app.pop_screen()
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
@@ -301,9 +305,27 @@ class RenameScreen(Screen):
         if not name:
             status.update("[red]Escribe un nombre[/red]")
             return
+        input_widget = self.query_one(Input)
+        input_widget.disabled = True
         app: "ShellGamesApp" = self.app  # type: ignore[assignment]
+        if not app.connected:
+            status.update("[dim]Conectando al servidor...[/dim]")
+        if not await app.wait_connected():
+            status.update("[red]No se pudo conectar al servidor. Intenta de nuevo.[/red]")
+            input_widget.disabled = False
+            return
+        status.update("[dim]Cambiando nombre... (Esc cancela)[/dim]")
         await app.send_line(f"/rename {name}")
-        new_name = await app.rename_queue.get()
+        self._wait_task = asyncio.create_task(self._await_rename(status, input_widget))
+
+    async def _await_rename(self, status: Static, input_widget: Input) -> None:
+        app: "ShellGamesApp" = self.app  # type: ignore[assignment]
+        try:
+            new_name = await asyncio.wait_for(app.rename_queue.get(), timeout=self.RENAME_TIMEOUT)
+        except asyncio.TimeoutError:
+            status.update("[red]El servidor no respondio. Intenta de nuevo.[/red]")
+            input_widget.disabled = False
+            return
         app.username = new_name
         self.app.pop_screen()
 
@@ -1162,6 +1184,9 @@ class ShellGamesApp(App):
                 async with connect(self.url, open_timeout=10) as ws:
                     self.ws = ws
                     await asyncio.wait_for(ws.recv(), timeout=10)  # "Nombre: "
+                    # usar self.username (no el parametro original) para que
+                    # una reconexion respete un /rename hecho antes del corte
+                    username = self.username or username
                     self.username = username
                     await ws.send(username)
                     await asyncio.wait_for(ws.recv(), timeout=10)  # "Conectado como ..."
