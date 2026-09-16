@@ -8,6 +8,13 @@ WIN_LINES = [
 ]
 
 
+def _config_base(config: str) -> str:
+    """Strips off an optional ':'-separated match-rounds suffix, kept
+    only for the client (round count, running score); the base is the
+    part game logic actually cares about (mode/preset)."""
+    return config.split(":", 1)[0]
+
+
 def check_winner(board: list[str]) -> str | None:
     """Returns 'X', 'O', 'draw', or None if the game is still going."""
     for a, b, c in WIN_LINES:
@@ -23,7 +30,7 @@ class TicTacToe:
 
     def __init__(self, game_id: str, host_ws, host_name: str, config: str = "-") -> None:
         self.id = game_id
-        self.config = "-"
+        self.config = config
         self.players: dict = {host_ws: ("X", host_name)}
         self.board: list[str] = [""] * 9
         self.turn = "X"
@@ -89,8 +96,9 @@ class Hangman:
 
     def __init__(self, game_id: str, host_ws, host_name: str, config: str = "classic") -> None:
         self.id = game_id
-        self.mode = config if config in HANGMAN_MODES else "classic"
-        self.config = self.mode
+        base = _config_base(config)
+        self.mode = base if base in HANGMAN_MODES else "classic"
+        self.config = config
         self.started = False
         self.progress: dict = {}  # ws -> {"guessed": set(), "misses": int}
         if self.mode == "both":
@@ -215,8 +223,9 @@ class Battleship:
 
     def __init__(self, game_id: str, host_ws, host_name: str, config: str = "classic") -> None:
         self.id = game_id
-        self.preset = config if config in BATTLESHIP_PRESETS else "classic"
-        self.config = self.preset
+        base = _config_base(config)
+        self.preset = base if base in BATTLESHIP_PRESETS else "classic"
+        self.config = config
         self.ship_sizes = BATTLESHIP_PRESETS[self.preset]
         self.players: dict = {host_ws: ("P1", host_name)}
         self.started = False
