@@ -1398,9 +1398,9 @@ class ShellGamesApp(App):
     #hm-misses { width: 100%; text-align: center; color: yellow; margin-bottom: 1; }
     BSBoard { width: 100%; height: auto; background: transparent; margin-bottom: 1; content-align: center middle; }
     #fleet-row { width: 100%; height: auto; margin-bottom: 1; }
-    #fleet-col { width: auto; margin-right: 2; }
+    #fleet-col { width: auto; height: auto; margin-right: 2; }
     #own-board { width: 8; height: 8; }
-    #fleet-label { width: 8; text-align: left; }
+    #fleet-label { width: 8; height: 1; text-align: left; }
     #remaining-label { width: 1fr; text-align: left; content-align: left middle; }
     Input { background: transparent; border: round green; width: 44; }
     Input:focus { border: round green; }
