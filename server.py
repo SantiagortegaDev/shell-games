@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Servidor de chat multiplayer por WebSocket, con salas de 3 en raya."""
+"""Multiplayer WebSocket chat server, with tic-tac-toe rooms."""
 import asyncio
 import logging
 import random
@@ -28,9 +28,9 @@ INACTIVITY_TIMEOUT = 120.0
 
 players: dict[ServerConnection, str] = {}
 games: dict[str, Game] = {}
-codes: dict[str, str] = {}  # codigo corto -> game_id
+codes: dict[str, str] = {}  # short code -> game_id
 invite_times: dict[ServerConnection, list[float]] = {}
-watchdogs: dict[str, asyncio.Task] = {}  # game_id -> timer de inactividad
+watchdogs: dict[str, asyncio.Task] = {}  # game_id -> inactivity timer
 
 
 async def broadcast(text: str, exclude: ServerConnection | None = None) -> None:
@@ -65,9 +65,9 @@ def new_code() -> str:
 
 
 def sanitize_name(name: str) -> str:
-    """El protocolo es texto separado por espacios: un nombre con espacios
-    rompe el parseo de !start/!invite/etc. en el cliente, asi que se sanea
-    aca, en el unico lugar donde nacen los nombres (conexion y /rename)."""
+    """The protocol is space-separated text: a name with spaces would
+    break !start/!invite/etc. parsing on the client, so it's sanitized
+    here, the only place names are born (connect and /rename)."""
     return re.sub(r"\s+", "_", name.strip())[:20]
 
 
@@ -92,7 +92,7 @@ def is_in_active_game(ws: ServerConnection) -> bool:
 
 
 def invite_rate_ok(ws: ServerConnection) -> bool:
-    """Maximo INVITE_RATE_LIMIT invitaciones por nombre cada INVITE_RATE_WINDOW segundos."""
+    """At most INVITE_RATE_LIMIT invites per name every INVITE_RATE_WINDOW seconds."""
     now = time.monotonic()
     times = invite_times.setdefault(ws, [])
     times[:] = [t for t in times if now - t < INVITE_RATE_WINDOW]
@@ -146,8 +146,8 @@ async def cleanup_games_for(ws: ServerConnection) -> None:
 
 
 def hangman_state_for(game: Hangman, pws) -> tuple[str, int]:
-    """En modo 'classic' el progreso es unico (del adivinador) y se ve
-    igual para los dos; en modo 'both' cada uno ve su propio progreso."""
+    """In 'classic' mode progress is single (the guesser's) and looks the
+    same for both; in 'both' mode each player sees their own progress."""
     if game.mode == "classic":
         guesser_ws = next(iter(game.progress))
         return game.revealed_for(guesser_ws), game.misses_for(guesser_ws)
@@ -168,25 +168,25 @@ async def broadcast_board(game: TicTacToe) -> None:
 
 
 async def handle_game_command(ws: ServerConnection, name: str, msg: str) -> bool:
-    """Procesa comandos de juego. Devuelve True si `msg` era uno de ellos."""
+    """Processes game commands. Returns True if `msg` was one of them."""
     parts = msg.split()
     cmd = parts[0]
 
     if cmd == "/play" and len(parts) == 4:
         if is_in_active_game(ws):
-            await send(ws, "!error ya estas jugando una partida")
+            await send(ws, "!error you're already playing a game")
             return True
         if not invite_rate_ok(ws):
-            await send(ws, "!error estas invitando muy rapido, espera un poco")
+            await send(ws, "!error you're inviting too fast, slow down")
             return True
         target_name, kind, config = parts[1], parts[2], parts[3]
         game_cls = GAME_CLASSES.get(kind)
         if game_cls is None:
-            await send(ws, "!error juego invalido")
+            await send(ws, "!error invalid game")
             return True
         target_ws = find_ws_by_name(target_name)
         if target_ws is None or target_ws is ws:
-            await send(ws, "!error jugador no encontrado")
+            await send(ws, "!error player not found")
             return True
         gid = new_game_id()
         games[gid] = game_cls(gid, ws, name, config)
@@ -196,12 +196,12 @@ async def handle_game_command(ws: ServerConnection, name: str, msg: str) -> bool
 
     if cmd == "/code" and len(parts) == 3:
         if is_in_active_game(ws):
-            await send(ws, "!error ya estas jugando una partida")
+            await send(ws, "!error you're already playing a game")
             return True
         kind, config = parts[1], parts[2]
         game_cls = GAME_CLASSES.get(kind)
         if game_cls is None:
-            await send(ws, "!error juego invalido")
+            await send(ws, "!error invalid game")
             return True
         gid = new_game_id()
         games[gid] = game_cls(gid, ws, name, config)
@@ -212,13 +212,13 @@ async def handle_game_command(ws: ServerConnection, name: str, msg: str) -> bool
 
     if cmd == "/join" and len(parts) == 2:
         if is_in_active_game(ws):
-            await send(ws, "!error ya estas jugando una partida")
+            await send(ws, "!error you're already playing a game")
             return True
         code = parts[1].upper()
         gid = codes.get(code)
         game = games.get(gid) if gid else None
         if game is None or game.started:
-            await send(ws, "!error codigo invalido")
+            await send(ws, "!error invalid code")
             return True
         codes.pop(code, None)
         game.add_guest(ws, name)
@@ -231,12 +231,12 @@ async def handle_game_command(ws: ServerConnection, name: str, msg: str) -> bool
 
     if cmd == "/accept" and len(parts) == 2:
         if is_in_active_game(ws):
-            await send(ws, "!error ya estas jugando una partida")
+            await send(ws, "!error you're already playing a game")
             return True
         gid = parts[1]
         game = games.get(gid)
         if game is None or game.started or ws in game.players:
-            await send(ws, "!error invitacion invalida")
+            await send(ws, "!error invalid invitation")
             return True
         game.add_guest(ws, name)
         for pws in game.players:
@@ -258,12 +258,12 @@ async def handle_game_command(ws: ServerConnection, name: str, msg: str) -> bool
         gid = parts[1]
         game = games.get(gid)
         if game is None or ws not in game.players or game.kind != "ttt":
-            await send(ws, "!error partida invalida")
+            await send(ws, "!error invalid game")
             return True
         try:
             cell = int(parts[2])
         except ValueError:
-            await send(ws, "!error celda invalida")
+            await send(ws, "!error invalid cell")
             return True
         error = game.move(ws, cell)
         if error:
@@ -276,7 +276,7 @@ async def handle_game_command(ws: ServerConnection, name: str, msg: str) -> bool
         gid = parts[1]
         game = games.get(gid)
         if game is None or ws not in game.players or game.kind != "hangman":
-            await send(ws, "!error partida invalida")
+            await send(ws, "!error invalid game")
             return True
         word = " ".join(parts[2:])
         error = game.set_word(ws, word)
@@ -294,7 +294,7 @@ async def handle_game_command(ws: ServerConnection, name: str, msg: str) -> bool
         gid = parts[1]
         game = games.get(gid)
         if game is None or ws not in game.players or game.kind != "hangman":
-            await send(ws, "!error partida invalida")
+            await send(ws, "!error invalid game")
             return True
         error = game.guess(ws, parts[2])
         if error:
@@ -319,12 +319,12 @@ async def handle_game_command(ws: ServerConnection, name: str, msg: str) -> bool
         gid = parts[1]
         game = games.get(gid)
         if game is None or ws not in game.players or game.kind != "battleship":
-            await send(ws, "!error partida invalida")
+            await send(ws, "!error invalid game")
             return True
         try:
             ship_index, row, col = int(parts[2]), int(parts[3]), int(parts[4])
         except ValueError:
-            await send(ws, "!error datos invalidos")
+            await send(ws, "!error invalid data")
             return True
         orientation = parts[5]
         error = game.place_ship(ws, ship_index, row, col, orientation)
@@ -344,12 +344,12 @@ async def handle_game_command(ws: ServerConnection, name: str, msg: str) -> bool
         gid = parts[1]
         game = games.get(gid)
         if game is None or ws not in game.players or game.kind != "battleship":
-            await send(ws, "!error partida invalida")
+            await send(ws, "!error invalid game")
             return True
         try:
             row, col = int(parts[2]), int(parts[3])
         except ValueError:
-            await send(ws, "!error coordenada invalida")
+            await send(ws, "!error invalid coordinate")
             return True
         error, _result, sunk_size = game.shoot(ws, row, col)
         if error:
@@ -374,7 +374,7 @@ async def handle_game_command(ws: ServerConnection, name: str, msg: str) -> bool
         gid = parts[1]
         game = games.get(gid)
         if game is None or ws not in game.players or not game.started:
-            await send(ws, "!error partida invalida")
+            await send(ws, "!error invalid game")
             return True
         cancel_watchdog(gid)
         winner_symbol = game.symbol_for(game.opponent_of(ws))
@@ -387,7 +387,7 @@ async def handle_game_command(ws: ServerConnection, name: str, msg: str) -> bool
 
 
 async def handler(ws: ServerConnection) -> None:
-    await ws.send("Nombre: ")
+    await ws.send("Name: ")
     try:
         name = (await ws.recv()).strip()
     except websockets.ConnectionClosed:
@@ -395,9 +395,9 @@ async def handler(ws: ServerConnection) -> None:
 
     name = dedupe_name(sanitize_name(name) or f"anon{id(ws) % 1000}")
     players[ws] = name
-    log.info("conectado: %s (%s) - %d en linea", name, ws.remote_address, len(players))
-    await ws.send(f"Conectado como {name}. Comandos: /who, /quit")
-    await broadcast(f"* {name} se unio", exclude=ws)
+    log.info("connected: %s (%s) - %d online", name, ws.remote_address, len(players))
+    await ws.send(f"Connected as {name}. Commands: /who, /quit")
+    await broadcast(f"* {name} joined", exclude=ws)
 
     try:
         async for raw in ws:
@@ -408,7 +408,7 @@ async def handler(ws: ServerConnection) -> None:
                 break
             if msg == "/who":
                 who = ", ".join(players.values())
-                await ws.send(f"* conectados ({len(players)}): {who}")
+                await ws.send(f"* online ({len(players)}): {who}")
                 continue
             if msg.startswith("/rename ") and len(msg.split()) == 2:
                 new_name = sanitize_name(msg.split()[1])
@@ -417,7 +417,7 @@ async def handler(ws: ServerConnection) -> None:
                     old_name = name
                     name = new_name
                     players[ws] = name
-                    log.info("renombrado: %s -> %s", old_name, name)
+                    log.info("renamed: %s -> %s", old_name, name)
                 await ws.send(f"!renamed {name}")
                 continue
             if msg.startswith("/") and await handle_game_command(ws, name, msg):
@@ -430,14 +430,14 @@ async def handler(ws: ServerConnection) -> None:
         players.pop(ws, None)
         invite_times.pop(ws, None)
         await cleanup_games_for(ws)
-        log.info("desconectado: %s - %d en linea", name, len(players))
-        await broadcast(f"* {name} se fue")
+        log.info("disconnected: %s - %d online", name, len(players))
+        await broadcast(f"* {name} left")
 
 
 async def main() -> None:
     port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
     async with serve(handler, HOST, port):
-        log.info("escuchando en %s:%d", HOST, port)
+        log.info("listening on %s:%d", HOST, port)
         await asyncio.Future()
 
 

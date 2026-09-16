@@ -1,4 +1,4 @@
-"""Logica de los juegos, sin nada de red (el server la orquesta)."""
+"""Game logic, no networking (the server orchestrates that)."""
 import random
 
 WIN_LINES = [
@@ -9,7 +9,7 @@ WIN_LINES = [
 
 
 def check_winner(board: list[str]) -> str | None:
-    """Devuelve 'X', 'O', 'draw' o None si la partida sigue."""
+    """Returns 'X', 'O', 'draw', or None if the game is still going."""
     for a, b, c in WIN_LINES:
         if board[a] and board[a] == board[b] == board[c]:
             return board[a]
@@ -46,16 +46,16 @@ class TicTacToe:
         return None
 
     def move(self, ws, cell: int) -> str:
-        """Intenta jugar `cell` (0-8). Devuelve '' si fue valida, o un error."""
+        """Tries to play `cell` (0-8). Returns '' if valid, or an error."""
         if not self.started:
-            return "la partida todavia no tiene dos jugadores"
+            return "the game doesn't have two players yet"
         symbol = self.symbol_for(ws)
         if symbol != self.turn:
-            return "no es tu turno"
+            return "it's not your turn"
         if not (0 <= cell <= 8):
-            return "celda invalida"
+            return "invalid cell"
         if self.board[cell]:
-            return "celda ocupada"
+            return "cell occupied"
         self.board[cell] = symbol
         self.turn = "O" if symbol == "X" else "X"
         return ""
@@ -73,17 +73,17 @@ class TicTacToe:
 HANGMAN_MAX_MISSES = 6
 HANGMAN_MODES = ("classic", "both")
 HANGMAN_WORDS = [
-    "gato", "perro", "casa", "arbol", "monte", "cielo", "playa", "fuego",
-    "nube", "rio", "sol", "luna", "estrella", "puente", "camino", "libro",
-    "tren", "avion", "barco", "flor", "montaña", "bosque", "piedra", "agua",
-    "viento", "invierno", "verano", "musica", "pintura", "escuela",
+    "cat", "dog", "house", "tree", "mountain", "sky", "beach", "fire",
+    "cloud", "river", "sun", "moon", "star", "bridge", "road", "book",
+    "train", "plane", "ship", "flower", "forest", "stone", "water",
+    "wind", "winter", "summer", "music", "painting", "school", "castle",
 ]
 
 
 class Hangman:
-    """Modo 'classic': uno pone la palabra, el otro adivina.
-    Modo 'both': el servidor elige una palabra al azar y los dos adivinan
-    por separado; gana quien la complete con menos fallos."""
+    """Mode 'classic': one player sets the word, the other guesses it.
+    Mode 'both': the server picks a random word and both players guess
+    independently; whoever finishes with fewer misses wins."""
 
     kind = "hangman"
 
@@ -123,7 +123,7 @@ class Hangman:
 
     def whose_turn_ws(self):
         if self.mode == "both":
-            return None  # los dos adivinan a su propio ritmo, no hay turnos
+            return None  # both guess at their own pace, no turns
         role = "setter" if not self.word_set else "guesser"
         for ws, (r, _) in self.players.items():
             if r == role:
@@ -132,12 +132,12 @@ class Hangman:
 
     def set_word(self, ws, word: str) -> str:
         if self.mode != "classic" or self.symbol_for(ws) != "setter":
-            return "no sos quien pone la palabra"
+            return "you're not the one setting the word"
         if self.word_set:
-            return "la palabra ya esta puesta"
+            return "the word is already set"
         word = word.strip().lower()
         if not word.isalpha() or not (3 <= len(word) <= 20):
-            return "palabra invalida (solo letras, 3 a 20)"
+            return "invalid word (letters only, 3 to 20)"
         self.word = word
         self.word_set = True
         return ""
@@ -148,17 +148,17 @@ class Hangman:
 
     def guess(self, ws, letter: str) -> str:
         if not self.word_set:
-            return "el rival todavia no eligio la palabra"
+            return "your opponent hasn't chosen the word yet"
         if ws not in self.progress:
-            return "no sos quien adivina"
+            return "you're not the guesser"
         if self.is_done_for(ws):
-            return "ya terminaste con esta palabra"
+            return "you already finished this word"
         letter = letter.strip().lower()
         if len(letter) != 1 or not letter.isalpha():
-            return "letra invalida"
+            return "invalid letter"
         p = self.progress[ws]
         if letter in p["guessed"]:
-            return "ya intentaste esa letra"
+            return "you already tried that letter"
         p["guessed"].add(letter)
         if letter not in self.word:
             p["misses"] += 1
@@ -172,7 +172,7 @@ class Hangman:
         return self.progress[ws]["misses"] if ws in self.progress else 0
 
     def result(self) -> str | None:
-        """Devuelve el rol/simbolo ganador, 'draw', o None si la partida sigue."""
+        """Returns the winning role/symbol, 'draw', or None if still going."""
         if not self.word_set:
             return None
         if self.mode == "classic":
@@ -183,7 +183,7 @@ class Hangman:
             if p["misses"] >= HANGMAN_MAX_MISSES:
                 return "setter"
             return None
-        # modo "both": termina cuando ambos terminaron su intento
+        # "both" mode: ends when both finished their attempt
         if not all(self.is_done_for(w) for w in self.progress):
             return None
         solved = {w: all(c in self.progress[w]["guessed"] for c in self.word) for w in self.progress}
@@ -199,7 +199,7 @@ class Hangman:
         return "draw"
 
 
-SHIP_SIZES = [4, 3, 2]  # preset "classic", tambien el default para el cliente
+SHIP_SIZES = [4, 3, 2]  # "classic" preset, also the client's default
 BOARD_SIZE = 8
 BATTLESHIP_PRESETS = {
     "classic": [4, 3, 2],
@@ -209,7 +209,7 @@ BATTLESHIP_PRESETS = {
 
 
 class Battleship:
-    """Cada jugador coloca sus barcos en privado, despues disparan por turnos."""
+    """Each player places their ships privately, then they take turns shooting."""
 
     kind = "battleship"
 
@@ -255,14 +255,14 @@ class Battleship:
 
     def place_ship(self, ws, ship_index: int, row: int, col: int, orientation: str) -> str:
         if self.battle:
-            return "ya empezo la fase de disparos"
+            return "the shooting phase already started"
         placed = self.placed_ships[ws]
         if ship_index in placed:
-            return "ese barco ya esta colocado"
+            return "that ship is already placed"
         if not (0 <= ship_index < len(self.ship_sizes)):
-            return "barco invalido"
+            return "invalid ship"
         if orientation not in ("h", "v"):
-            return "orientacion invalida"
+            return "invalid orientation"
         size = self.ship_sizes[ship_index]
         occupied = {c for cells in placed.values() for c in cells}
         cells = []
@@ -270,10 +270,10 @@ class Battleship:
             r = row + (i if orientation == "v" else 0)
             c = col + (i if orientation == "h" else 0)
             if not (0 <= r < BOARD_SIZE and 0 <= c < BOARD_SIZE):
-                return "el barco se sale del tablero"
+                return "the ship goes off the board"
             idx = r * BOARD_SIZE + c
             if idx in occupied:
-                return "se superpone con otro barco"
+                return "it overlaps another ship"
             cells.append(idx)
         placed[ship_index] = cells
         return ""
@@ -283,20 +283,20 @@ class Battleship:
         self.turn = next(iter(self.players))
 
     def shoot(self, ws, row: int, col: int) -> tuple[str, str, int | None]:
-        """Devuelve (error, resultado, tamano_hundido). resultado: 'hit' o
-        'miss' si no hubo error. Acertar da otro turno; solo fallar pasa el
-        turno al rival. tamano_hundido es el tamano del barco recien
-        hundido con este disparo, o None si no se hundio ninguno."""
+        """Returns (error, result, sunk_size). result is 'hit' or 'miss'
+        when there's no error. A hit grants another turn; only a miss
+        passes the turn to the opponent. sunk_size is the size of the ship
+        just sunk by this shot, or None if none was sunk."""
         if not self.battle:
-            return "todavia se estan colocando los barcos", "", None
+            return "ships are still being placed", "", None
         if ws != self.turn:
-            return "no es tu turno", "", None
+            return "it's not your turn", "", None
         if not (0 <= row < BOARD_SIZE and 0 <= col < BOARD_SIZE):
-            return "coordenada invalida", "", None
+            return "invalid coordinate", "", None
         idx = row * BOARD_SIZE + col
         opponent = self.opponent_of(ws)
         if idx in self.shots_at[opponent]:
-            return "ya disparaste ahi", "", None
+            return "you already shot there", "", None
         self.shots_at[opponent].add(idx)
         placed = self.placed_ships[opponent]
         ship_cells = {c for cells in placed.values() for c in cells}
@@ -312,7 +312,7 @@ class Battleship:
         return "", ("hit" if hit else "miss"), sunk_size
 
     def check_winner(self):
-        """Devuelve el simbolo ganador o None si sigue."""
+        """Returns the winning symbol, or None if still going."""
         for ws in self.players:
             opponent = self.opponent_of(ws)
             ship_cells = {c for cells in self.placed_ships[opponent].values() for c in cells}
