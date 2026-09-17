@@ -147,11 +147,24 @@ async def cleanup_games_for(ws: ServerConnection) -> None:
 
 def hangman_state_for(game: Hangman, pws) -> tuple[str, int]:
     """In 'classic' mode progress is single (the guesser's) and looks the
-    same for both; in 'both' mode each player sees their own progress."""
+    same for both; in 'race'/'turns' each player's view is computed from
+    the game's own per-mode state (revealed_for/misses_for already know
+    whether that's per-player or shared)."""
     if game.mode == "classic":
         guesser_ws = next(iter(game.progress))
         return game.revealed_for(guesser_ws), game.misses_for(guesser_ws)
     return game.revealed_for(pws), game.misses_for(pws)
+
+
+def hangman_turn_symbol(game: Hangman) -> str:
+    return game.symbol_for(game.turn) if game.mode == "turns" else "-"
+
+
+async def broadcast_hangman_state(game: Hangman, gid: str) -> None:
+    turn_symbol = hangman_turn_symbol(game)
+    for pws in game.players:
+        revealed, misses = hangman_state_for(game, pws)
+        await send(pws, f"!hm_state {gid} {revealed} {misses} {turn_symbol}")
 
 
 async def broadcast_board(game: TicTacToe) -> None:
@@ -225,6 +238,8 @@ async def handle_game_command(ws: ServerConnection, name: str, msg: str) -> bool
         for pws in game.players:
             opp = game.name_for(game.opponent_of(pws))
             await send(pws, f"!start {gid} {opp} {game.symbol_for(pws)} {game.kind} {game.config}")
+        if game.kind == "hangman" and game.word_set:
+            await broadcast_hangman_state(game, gid)
         if game.whose_turn_ws() is not None:
             schedule_watchdog(gid)
         return True
@@ -242,6 +257,8 @@ async def handle_game_command(ws: ServerConnection, name: str, msg: str) -> bool
         for pws in game.players:
             opp = game.name_for(game.opponent_of(pws))
             await send(pws, f"!start {gid} {opp} {game.symbol_for(pws)} {game.kind} {game.config}")
+        if game.kind == "hangman" and game.word_set:
+            await broadcast_hangman_state(game, gid)
         if game.whose_turn_ws() is not None:
             schedule_watchdog(gid)
         return True
@@ -283,9 +300,7 @@ async def handle_game_command(ws: ServerConnection, name: str, msg: str) -> bool
         if error:
             await send(ws, f"!error {error}")
             return True
-        for pws in game.players:
-            revealed, misses = hangman_state_for(game, pws)
-            await send(pws, f"!hm_state {gid} {revealed} {misses}")
+        await broadcast_hangman_state(game, gid)
         if game.whose_turn_ws() is not None:
             schedule_watchdog(gid)
         return True
@@ -303,14 +318,13 @@ async def handle_game_command(ws: ServerConnection, name: str, msg: str) -> bool
         result = game.result()
         if result is not None:
             cancel_watchdog(gid)
+            turn_symbol = hangman_turn_symbol(game)
             for pws in game.players:
-                await send(pws, f"!hm_state {gid} {game.word} {game.misses_for(pws)}")
+                await send(pws, f"!hm_state {gid} {game.word} {game.misses_for(pws)} {turn_symbol}")
                 await send(pws, f"!over {gid} {result} normal")
             games.pop(gid, None)
         else:
-            for pws in game.players:
-                revealed, misses = hangman_state_for(game, pws)
-                await send(pws, f"!hm_state {gid} {revealed} {misses}")
+            await broadcast_hangman_state(game, gid)
             if game.whose_turn_ws() is not None:
                 schedule_watchdog(gid)
         return True

@@ -78,7 +78,7 @@ class TicTacToe:
 
 
 HANGMAN_MAX_MISSES = 6
-HANGMAN_MODES = ("classic", "both")
+HANGMAN_MODES = ("classic", "race", "turns")
 HANGMAN_WORDS = [
     "cat", "dog", "house", "tree", "mountain", "sky", "beach", "fire",
     "cloud", "river", "sun", "moon", "star", "bridge", "road", "book",
@@ -89,8 +89,12 @@ HANGMAN_WORDS = [
 
 class Hangman:
     """Mode 'classic': one player sets the word, the other guesses it.
-    Mode 'both': the server picks a random word and both players guess
-    independently; whoever finishes with fewer misses wins."""
+    Mode 'race': the server picks a random word and both players guess
+    independently at their own pace; whoever completes it first wins.
+    Mode 'turns': one shared word, players alternate guesses (a hit
+    grants another turn, a miss passes the turn); whoever's guess
+    completes the word wins. A full-word guess is allowed too — wrong
+    counts as exactly one miss."""
 
     kind = "hangman"
 
@@ -100,21 +104,27 @@ class Hangman:
         self.mode = base if base in HANGMAN_MODES else "classic"
         self.config = config
         self.started = False
-        self.progress: dict = {}  # ws -> {"guessed": set(), "misses": int}
-        if self.mode == "both":
-            self.word = random.choice(HANGMAN_WORDS)
-            self.word_set = True
-            self.players: dict = {host_ws: ("P1", host_name)}
-            self.progress[host_ws] = {"guessed": set(), "misses": 0}
-        else:
+        self.progress: dict = {}  # ws -> {"guessed": set(), "misses": int}  (classic + race)
+        if self.mode == "classic":
             self.word = ""
             self.word_set = False
             self.players = {host_ws: ("setter", host_name)}
+        else:
+            self.word = random.choice(HANGMAN_WORDS)
+            self.word_set = True
+            self.players: dict = {host_ws: ("P1", host_name)}
+            if self.mode == "race":
+                self.progress[host_ws] = {"guessed": set(), "misses": 0}
+            else:  # turns
+                self.guessed: set = set()
+                self.misses = 0
+                self.turn = host_ws
 
     def add_guest(self, guest_ws, guest_name: str) -> None:
-        role = "P2" if self.mode == "both" else "guesser"
+        role = "P2" if self.mode != "classic" else "guesser"
         self.players[guest_ws] = (role, guest_name)
-        self.progress[guest_ws] = {"guessed": set(), "misses": 0}
+        if self.mode in ("classic", "race"):
+            self.progress[guest_ws] = {"guessed": set(), "misses": 0}
         self.started = True
 
     def symbol_for(self, ws) -> str:
@@ -130,15 +140,19 @@ class Hangman:
         return None
 
     def whose_turn_ws(self):
-        if self.mode == "both":
-            return None  # both guess at their own pace, no turns
-        role = "setter" if not self.word_set else "guesser"
-        for ws, (r, _) in self.players.items():
-            if r == role:
-                return ws
-        return None
+        if self.mode == "classic":
+            role = "setter" if not self.word_set else "guesser"
+            for ws, (r, _) in self.players.items():
+                if r == role:
+                    return ws
+            return None
+        if self.mode == "race":
+            return None  # everyone guesses at their own pace, no turns
+        return self.turn
 
     def set_word(self, ws, word: str) -> str:
+        if not self.started:
+            return "the game doesn't have two players yet"
         if self.mode != "classic" or self.symbol_for(ws) != "setter":
             return "you're not the one setting the word"
         if self.word_set:
@@ -154,14 +168,16 @@ class Hangman:
         p = self.progress[ws]
         return all(c in p["guessed"] for c in self.word) or p["misses"] >= HANGMAN_MAX_MISSES
 
-    def guess(self, ws, letter: str) -> str:
+    def guess(self, ws, text: str) -> str:
         if not self.word_set:
             return "your opponent hasn't chosen the word yet"
+        if self.mode == "turns":
+            return self._guess_turns(ws, text)
         if ws not in self.progress:
             return "you're not the guesser"
         if self.is_done_for(ws):
             return "you already finished this word"
-        letter = letter.strip().lower()
+        letter = text.strip().lower()
         if len(letter) != 1 or not letter.isalpha():
             return "invalid letter"
         p = self.progress[ws]
@@ -172,12 +188,38 @@ class Hangman:
             p["misses"] += 1
         return ""
 
+    def _guess_turns(self, ws, text: str) -> str:
+        if ws != self.turn:
+            return "it's not your turn"
+        text = text.strip().lower()
+        if not text.isalpha():
+            return "invalid guess"
+        if len(text) == 1:
+            if text in self.guessed:
+                return "that letter was already tried"
+            hit = text in self.word
+            if hit:
+                self.guessed.add(text)
+        elif len(text) == len(self.word):
+            hit = text == self.word
+            if hit:
+                self.guessed.update(self.word)
+        else:
+            return "invalid guess"
+        if hit:
+            return ""  # a hit grants another turn
+        self.misses += 1
+        self.turn = self.opponent_of(ws)
+        return ""
+
     def revealed_for(self, ws) -> str:
-        guessed = self.progress[ws]["guessed"] if ws in self.progress else set()
+        guessed = self.guessed if self.mode == "turns" else self.progress.get(ws, {}).get("guessed", set())
         return "".join(c if c in guessed else "_" for c in self.word)
 
     def misses_for(self, ws) -> int:
-        return self.progress[ws]["misses"] if ws in self.progress else 0
+        if self.mode == "turns":
+            return self.misses
+        return self.progress.get(ws, {}).get("misses", 0)
 
     def result(self) -> str | None:
         """Returns the winning role/symbol, 'draw', or None if still going."""
@@ -191,20 +233,18 @@ class Hangman:
             if p["misses"] >= HANGMAN_MAX_MISSES:
                 return "setter"
             return None
-        # "both" mode: ends when both finished their attempt
-        if not all(self.is_done_for(w) for w in self.progress):
+        if self.mode == "turns":
+            if all(c in self.guessed for c in self.word):
+                return self.symbol_for(self.turn)
             return None
-        solved = {w: all(c in self.progress[w]["guessed"] for c in self.word) for w in self.progress}
-        if all(solved.values()):
-            best = min(self.progress, key=lambda w: self.progress[w]["misses"])
-            other = self.opponent_of(best)
-            if self.progress[best]["misses"] == self.progress[other]["misses"]:
-                return "draw"
-            return self.symbol_for(best)
-        if any(solved.values()):
-            winner = next(w for w, ok in solved.items() if ok)
-            return self.symbol_for(winner)
-        return "draw"
+        # "race": ends as soon as anyone completes the word; a draw only
+        # once everyone still in the running has maxed out their misses.
+        for w in self.progress:
+            if all(c in self.progress[w]["guessed"] for c in self.word):
+                return self.symbol_for(w)
+        if all(self.is_done_for(w) for w in self.progress):
+            return "draw"
+        return None
 
 
 SHIP_SIZES = [4, 3, 2]  # "classic" preset, also the client's default
@@ -263,6 +303,8 @@ class Battleship:
         return all(self.is_placement_done(w) for w in self.players)
 
     def place_ship(self, ws, ship_index: int, row: int, col: int, orientation: str) -> str:
+        if not self.started:
+            return "the game doesn't have two players yet"
         if self.battle:
             return "the shooting phase already started"
         placed = self.placed_ships[ws]
