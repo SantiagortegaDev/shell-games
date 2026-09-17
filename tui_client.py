@@ -1324,18 +1324,19 @@ class BattleshipScreen(FinishableScreen):
             yield Static("BATTLESHIP", id="game-title")
             yield Static(f"vs {self.opponent}", id="game-opponent")
             yield Static("", id="game-status")
-            with Horizontal(id="fleet-row"):
+            with Horizontal(id="battle-row"):
                 with Vertical(id="fleet-col"):
                     yield Static("[dim]Your fleet:[/dim]", id="fleet-label")
                     yield BSBoard(compact=True, id="own-board")
-                yield Static("", id="remaining-label")
-            yield BSBoard(id="board")
+                with Vertical(id="tracking-col"):
+                    yield Static("", id="remaining-label")
+                    yield BSBoard(id="board")
             yield Static("[dim]Back \\[q][/dim]", id="quit-hint")
             yield Menu(self._finish_menu_options(), show_hint=False, id="menu")
 
     def on_mount(self) -> None:
         self.query_one(Menu).display = False
-        self.query_one("#fleet-row").display = False
+        self.query_one("#fleet-col").display = False
         board = self.query_one("#board", BSBoard)
         board.interactive = True
         board.set_ghost_len(self.ship_sizes[0])
@@ -1416,7 +1417,7 @@ class BattleshipScreen(FinishableScreen):
             self.phase = "battle"
             board.show_own = False
             board.set_ghost_len(0)
-            self.query_one("#fleet-row").display = True
+            self.query_one("#fleet-col").display = True
             # revealing a previously-hidden widget mid-session can leave a
             # stale incremental repaint in some terminals (the box grows
             # by 10 rows but the diff-based redraw doesn't always clear
@@ -1492,11 +1493,12 @@ class ShellGamesApp(App):
     #hm-word { width: 100%; text-align: center; color: white; margin: 1 0; }
     #hm-misses { width: 100%; text-align: center; color: yellow; margin-bottom: 1; }
     BSBoard { width: 100%; height: auto; background: transparent; margin-bottom: 1; content-align: center middle; }
-    #fleet-row { width: 100%; height: auto; margin-bottom: 1; }
+    #battle-row { width: 100%; height: auto; }
     #fleet-col { width: auto; height: auto; margin-right: 2; }
     #own-board { width: 8; height: 8; }
     #fleet-label { width: 8; height: 1; text-align: left; }
-    #remaining-label { width: 1fr; text-align: left; content-align: left middle; }
+    #tracking-col { width: 1fr; height: auto; }
+    #remaining-label { width: 100%; height: 1; text-align: left; }
     Input { background: transparent; border: round green; width: 44; }
     Input:focus { border: round green; }
     InvitePopup { align: center middle; background: black 60%; }
