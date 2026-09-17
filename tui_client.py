@@ -1589,6 +1589,14 @@ class ShellGamesApp(App):
             self._who_queue.put_nowait(msg)
         elif msg.startswith("!invite "):
             _, gid, inviter, kind, config = msg.split()
+            if isinstance(self.screen, game_screens) and not self.screen.finished:
+                # server already refuses to invite a busy player, but
+                # just in case one still slips through (a race right as
+                # a game starts), auto-decline instead of popping a
+                # modal over an active game — it would silently eat
+                # arrow-key input meant for the board underneath.
+                self.run_worker(self.send_line(f"/decline {gid}"))
+                return
             if isinstance(self.screen, game_screens) and self.screen.finished:
                 # don't leave the old finished game underneath in the
                 # stack: if this invite is accepted and then "Back" is

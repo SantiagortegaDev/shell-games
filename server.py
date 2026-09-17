@@ -201,6 +201,9 @@ async def handle_game_command(ws: ServerConnection, name: str, msg: str) -> bool
         if target_ws is None or target_ws is ws:
             await send(ws, "!error player not found")
             return True
+        if is_in_active_game(target_ws):
+            await send(ws, "!error that player is already in a game")
+            return True
         gid = new_game_id()
         games[gid] = game_cls(gid, ws, name, config)
         await send(target_ws, f"!invite {gid} {name} {kind} {config}")
