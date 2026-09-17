@@ -743,29 +743,38 @@ class AbandonConfirmScreen(ModalScreen):
 class QuitConfirmScreen(ModalScreen):
     """Confirmation popup shown on Ctrl+C or Esc, from anywhere the
     current screen doesn't already claim that key for its own back
-    navigation."""
+    navigation. Offers a "Go to menu" shortcut too, but only when
+    triggered from an actual game screen — no point offering it from
+    the menu itself."""
 
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, from_game: bool = False) -> None:
+        super().__init__()
+        self.from_game = from_game
 
     def action_cancel(self) -> None:
         self.dismiss()
 
     def compose(self) -> ComposeResult:
+        options = [("no", "No, keep playing")]
+        if self.from_game:
+            options.append(("menu", "Go to menu"))
+        options.append(("yes", "Yes, quit"))
         with Vertical(id="invite-box"):
             yield Static("[bold]Quit Shell Games?[/bold]", id="invite-title")
-            yield Menu(
-                [("no", "No, keep playing"), ("yes", "Yes, quit")],
-                show_hint=False,
-                id="menu",
-            )
+            yield Menu(options, show_hint=False, id="menu")
 
     def on_mount(self) -> None:
         self.query_one(Menu).focus()
 
     def on_menu_selected(self, event: Menu.Selected) -> None:
+        app: "ShellGamesApp" = self.app  # type: ignore[assignment]
         if event.value == "yes":
-            app: "ShellGamesApp" = self.app  # type: ignore[assignment]
             app.action_quit_clean()
+        elif event.value == "menu":
+            self.dismiss()
+            app.leave_game_to_menu()  # type: ignore[attr-defined]
         else:
             self.dismiss()
 
@@ -1641,8 +1650,17 @@ class ShellGamesApp(App):
             return "No response from the server."
 
     def action_confirm_quit(self) -> None:
-        if not isinstance(self.screen, QuitConfirmScreen):
-            self.push_screen(QuitConfirmScreen())
+        if isinstance(self.screen, QuitConfirmScreen):
+            return
+        game_screens = (GameScreen, HangmanScreen, BattleshipScreen)
+        self.push_screen(QuitConfirmScreen(from_game=isinstance(self.screen, game_screens)))
+
+    def leave_game_to_menu(self) -> None:
+        game_screens = (GameScreen, HangmanScreen, BattleshipScreen)
+        screen = self.screen
+        if isinstance(screen, game_screens) and not screen.finished:
+            self.run_worker(self.send_line(f"/forfeit {screen.gid}"))
+        self.pop_to_main()
 
     def action_quit_clean(self) -> None:
         async def _quit() -> None:
