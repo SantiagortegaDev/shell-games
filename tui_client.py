@@ -1408,6 +1408,11 @@ class BattleshipScreen(FinishableScreen):
             board.show_own = False
             board.set_ghost_len(0)
             self.query_one("#fleet-row").display = True
+            # revealing a previously-hidden widget mid-session can leave a
+            # stale incremental repaint in some terminals (the box grows
+            # by 10 rows but the diff-based redraw doesn't always clear
+            # the old blank region) — force a full relayout+repaint here.
+            self.refresh(layout=True)
         own_board = self.query_one("#own-board", BSBoard)
         own_board.show_own = True
         own_board.set_cells(own, interactive=False)
