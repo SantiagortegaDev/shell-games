@@ -9,7 +9,7 @@ import time
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Center, Horizontal, Vertical
 from textual.message import Message
 from textual.reactive import reactive
 from textual.screen import ModalScreen, Screen
@@ -1330,7 +1330,8 @@ class BattleshipScreen(FinishableScreen):
                     yield BSBoard(compact=True, id="own-board")
                 with Vertical(id="tracking-col"):
                     yield Static("", id="remaining-label")
-                    yield BSBoard(id="board")
+                    with Center():
+                        yield BSBoard(id="board")
             yield Static("[dim]Back \\[q][/dim]", id="quit-hint")
             yield Menu(self._finish_menu_options(), show_hint=False, id="menu")
 
@@ -1498,6 +1499,7 @@ class ShellGamesApp(App):
     #own-board { width: 8; height: 8; }
     #fleet-label { width: 8; height: 1; text-align: left; }
     #tracking-col { width: 1fr; height: auto; }
+    #tracking-col BSBoard { width: auto; }
     #remaining-label { width: 100%; height: 1; text-align: left; }
     Input { background: transparent; border: round green; width: 44; }
     Input:focus { border: round green; }
